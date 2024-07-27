@@ -6,31 +6,27 @@ use burn::config::Config;
 use burn::module::Module;
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, ElementConversion, Int};
-use burn::tensor::loss::cross_entropy_with_logits;
 use burn::tensor::{Bool, Tensor};
-use itertools::Itertools;
+use burn::tensor::loss::cross_entropy_with_logits;
 
-use crate::mine;
 use crate::mine::{get_negative_samples, sample_negative_indices};
 use crate::model::{AudioModel, AudioModelConfig, AudioModelInput};
 use crate::model::encoder::{Encoder, EncoderConfig};
-use crate::model::extractor::FeatureExtractorConfig;
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
-use crate::util::sample_test_batch;
 
 #[derive(Config)]
 pub struct PretrainConfig {
-    model_config: AudioModelConfig,
-    feature_dropout: f32,
-    projected_size: usize,
+    pub model_config: AudioModelConfig,
+    pub feature_dropout: f32,
+    pub projected_size: usize,
 }
 
 impl PretrainConfig {
     pub fn init<
         B: Backend,
-        E: Encoder<B, Config = EC>,
+        E: Encoder<B, Config=EC>,
         EC: EncoderConfig,
-        Q: Quantizer<B, Config = QC>,
+        Q: Quantizer<B, Config=QC>,
         QC: QuantizerConfig,
     >(
         self,
@@ -146,6 +142,13 @@ impl<B: AudioStuffBackend, E: Encoder<B>, Q: Quantizer<B>> Pretrain<B, E, Q> {
             .clone()
             .swap_dims(0, 2)
             .reshape([-1, contrastive_logits.dims()[0] as i32]);
+
+        let masked_logits = masked_time_steps.clone().bool_not().nonzero();
+
+        dbg!(&logits);
+        dbg!(&masked_logits);
+
+        let logits = Tensor::gather(logits, 0, masked_logits[1].clone().unsqueeze_dim::<2>(0));
 
         // TODO: pytorch cross entropy loss ignores -100 target values, needs a workaround
         let target = ((Tensor::ones_like(&masked_time_steps.clone().float()) - masked_time_steps.clone().float()) * -100.0)

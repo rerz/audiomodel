@@ -1,4 +1,4 @@
-use burn::prelude::{Backend, Int, Tensor};
+use burn::prelude::{Backend, Tensor};
 use burn::tensor::Bool;
 
 pub mod linear;

@@ -1,9 +1,9 @@
-mod pad;
-mod mask;
-mod mine;
-mod model;
-mod util;
-mod data;
+pub mod pad;
+pub mod mask;
+pub mod mine;
+pub mod model;
+pub mod util;
+pub mod data;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

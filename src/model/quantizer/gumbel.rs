@@ -1,9 +1,10 @@
 use burn::config::Config;
-use burn::module::Param;
+use burn::module::{Module, Param};
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, ElementConversion, Int};
+use burn::prelude::{Backend, ElementConversion};
 use burn::tensor::{Bool, Distribution, Tensor};
 use burn::tensor::activation::softmax;
+
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
 
 fn sample_gumbel<B: Backend>(shape: [usize; 2]) -> Tensor<B, 2> {
@@ -62,12 +63,13 @@ impl GumbelQuantizerConfig {
                 last_conv_dim,
                 self.num_groups * self.vectors_per_group,
             )
-            .init(&B::Device::default()),
+                .init(&B::Device::default()),
             temperature: 2.0,
         }
     }
 }
 
+#[derive(Module, Debug)]
 pub struct GumbelQuantizer<B: Backend> {
     num_groups: usize,
     vectors_per_group: usize,

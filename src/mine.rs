@@ -1,11 +1,5 @@
-use burn::backend::NdArray;
-use burn::backend::ndarray::NdArrayDevice;
 use burn::prelude::{Backend, Bool, Float, Int};
 use burn::tensor::{Distribution, Tensor};
-use itertools::Itertools;
-use rand::{Rng, thread_rng};
-
-use crate::pad::pad_sequences;
 
 pub fn sample_negative_indices<B: Backend>(
     [batch, seq]: [usize; 2],
@@ -33,14 +27,14 @@ pub fn sample_negative_indices<B: Backend>(
             Tensor::arange(0..(seq_len as i64) + 1, &B::Device::default()).unsqueeze_dim(1),
             [(seq_len + 1) as usize, num_negatives],
         )
-        .clone();
+            .clone();
 
         let sampled_indices = Tensor::<B, 2>::random(
             [(seq_len + 1) as usize, num_negatives],
             Distribution::Uniform(0.0, seq_len as f64),
             &B::Device::default(),
         )
-        .int();
+            .int();
 
         let greater_mask = Tensor::greater_equal(sampled_indices.clone(), feature_range);
         let inced = sampled_indices.clone() + 1;

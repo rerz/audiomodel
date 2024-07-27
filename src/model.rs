@@ -1,9 +1,10 @@
 use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::prelude::Backend;
-use burn::tensor::{Bool, Int, Tensor};
+use burn::tensor::{Bool, Tensor};
 use itertools::Itertools;
 use ndarray::AssignElem;
+
 use crate::mask;
 use crate::model::encoder::{Encoder, EncoderConfig};
 use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig};
@@ -24,7 +25,7 @@ pub struct AudioModelConfig {
 }
 
 impl AudioModelConfig {
-    pub fn init<B: Backend, E: Encoder<B, Config = EC>, EC: EncoderConfig>(
+    pub fn init<B: Backend, E: Encoder<B, Config=EC>, EC: EncoderConfig>(
         self,
         input_len: usize,
         encoder_config: EC,

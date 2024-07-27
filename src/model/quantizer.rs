@@ -1,8 +1,8 @@
-use burn::prelude::{Backend, Int, Tensor};
+use burn::prelude::{Backend, Tensor};
 use burn::tensor::Bool;
 
-mod gumbel;
-mod knn;
+pub mod gumbel;
+pub mod knn;
 
 pub trait QuantizerConfig {
     fn quantized_dim(&self) -> usize;

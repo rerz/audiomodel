@@ -1,8 +1,9 @@
 use burn::prelude::{Backend, ElementConversion, Int};
 use burn::tensor::{Bool, Distribution, Tensor};
+use itertools::Itertools;
 use rand::distributions::Uniform;
 use rand::Rng;
-use itertools::Itertools;
+
 use crate::model::extractor::feature_extractor_output_lens;
 
 pub fn get_mask_indices<B: Backend>(
@@ -36,7 +37,7 @@ pub fn get_mask_indices<B: Backend>(
             Distribution::Uniform(0.0, (seq_len - mask_len - 1) as f64),
             &B::Device::default(),
         )
-        .int();
+            .int();
 
         let dummy_idx = if starting_indices.dims()[0] == 0 {
             (seq - 1) as u32

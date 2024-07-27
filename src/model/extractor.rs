@@ -69,7 +69,7 @@ impl FeatureExtractorConfig {
                 .map(FeatureExtractorConvLayer::from)
                 .collect_vec(),
             kernel_sizes: self.conv_kernels,
-            strides: self.conv_strides
+            strides: self.conv_strides,
         }
     }
 

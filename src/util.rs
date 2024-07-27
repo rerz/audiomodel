@@ -1,6 +1,7 @@
 use burn::prelude::Backend;
 use itertools::Itertools;
 use rand::{Rng, thread_rng};
+
 use crate::data::AudioBatch;
 use crate::pad::{pad_sequences, PaddingType};
 
@@ -14,7 +15,7 @@ pub(crate) fn sample_sequence(min_len: usize, max_len: usize) -> Vec<f32> {
     seq
 }
 
-pub(crate) fn sample_test_batch<B: Backend>(
+pub fn sample_test_batch<B: Backend>(
     batch_size: usize,
     min_len: usize,
     max_len: usize,
