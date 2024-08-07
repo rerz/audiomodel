@@ -1,12 +1,16 @@
+use burn::module::Module;
 use burn::prelude::{Backend, Tensor};
+use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Bool;
 
 pub mod linear;
 pub mod transformer;
 
-pub trait EncoderConfig {}
+pub trait EncoderConfig {
+    type Model<B>: Encoder<B, Config=Self> where B: Backend;
+}
 
-pub trait Encoder<B: Backend> {
+pub trait Encoder<B: Backend>: Module<B> {
     type Config: EncoderConfig;
 
     fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize) -> Self;

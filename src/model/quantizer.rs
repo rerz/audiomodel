@@ -1,17 +1,21 @@
+use burn::module::{AutodiffModule, Module};
 use burn::prelude::{Backend, Tensor};
+use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Bool;
 
 pub mod gumbel;
 pub mod knn;
 
 pub trait QuantizerConfig {
+    type Model<B>: Quantizer<B, Config=Self> where B: Backend;
+
     fn quantized_dim(&self) -> usize;
 }
 
-pub trait Quantizer<B: Backend> {
+pub trait Quantizer<B: Backend>: Module<B> {
     type Config: QuantizerConfig;
 
-    fn new(last_conv_dim: usize, config: Self::Config) -> Self;
+    fn new(last_conv_dim: usize, config: Self::Config, device: &B::Device) -> Self;
 
     fn forward<const TRAINING: bool>(
         &self,

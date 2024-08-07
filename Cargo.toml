@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-burn = { version = "0.13.2", features = ["tch", "ndarray", "train"] }
+burn = { version = "0.13.2", features = ["tch", "ndarray", "train", "autodiff"] }
 color-eyre = "0.6.3"
 itertools = "0.13.0"
 ndarray = "0.15.6"
@@ -12,3 +12,8 @@ rand = "0.8.5"
 tch = "0.15.0"
 tracing = "0.1.40"
 unzip3 = "1.0.0"
+parquet = "52.2.0"
+hf-hub = "0.3.2"
+thiserror = "1.0.63"
+num-traits = "0.2.19"
+burn-autodiff = "0.13.2"

@@ -4,6 +4,7 @@ use burn::nn::{Linear, LinearConfig};
 use burn::prelude::{Backend, ElementConversion};
 use burn::tensor::{Bool, Distribution, Tensor};
 use burn::tensor::activation::softmax;
+use burn::tensor::backend::AutodiffBackend;
 
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
 
@@ -80,6 +81,8 @@ pub struct GumbelQuantizer<B: Backend> {
 }
 
 impl QuantizerConfig for GumbelQuantizerConfig {
+    type Model<B> = GumbelQuantizer<B> where B: Backend;
+
     fn quantized_dim(&self) -> usize {
         self.vector_dim
     }
@@ -88,7 +91,7 @@ impl QuantizerConfig for GumbelQuantizerConfig {
 impl<B: Backend> Quantizer<B> for GumbelQuantizer<B> {
     type Config = GumbelQuantizerConfig;
 
-    fn new(last_conv_dim: usize, config: Self::Config) -> Self {
+    fn new(last_conv_dim: usize, config: Self::Config, device: &B::Device) -> Self {
         config.init(last_conv_dim)
     }
 

@@ -1,11 +1,13 @@
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::{Dropout, DropoutConfig, Gelu, LayerNorm, Linear, LinearConfig};
+use burn::nn::{Dropout, DropoutConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::Backend;
 use burn::tensor::{Bool, Tensor};
 use burn::tensor::activation::softmax;
-use crate::model::encoder::Encoder;
-use crate::model::posconv::PosConv;
+use burn::tensor::backend::AutodiffBackend;
+use itertools::Itertools;
+use crate::model::encoder::{Encoder, EncoderConfig};
+use crate::model::posconv::{PosConv, PosConvConfig};
 
 #[derive(Config)]
 pub struct EncoderAttentionConfig {
@@ -95,6 +97,25 @@ pub struct EncoderFeedForward<B: Backend> {
     output_dropout: Dropout,
 }
 
+#[derive(Config)]
+pub struct EncoderFeedForwardConfig {
+    activation_dropout: f32,
+    intermediate_size: usize,
+    hidden_dropout: f32,
+}
+
+impl EncoderFeedForwardConfig {
+    pub fn init<B: Backend>(self, hidden_size: usize) -> EncoderFeedForward<B> {
+        EncoderFeedForward {
+            dense: LinearConfig::new(hidden_size, self.intermediate_size).init(&B::Device::default()),
+            activation: Gelu::new(),
+            dropout: DropoutConfig::new(self.activation_dropout as f64).init(),
+            output_dense: LinearConfig::new(self.intermediate_size, hidden_size).init(&B::Device::default()),
+            output_dropout: DropoutConfig::new(self.hidden_dropout as f64).init(),
+        }
+    }
+}
+
 impl<B: Backend> EncoderFeedForward<B> {
     pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         let hidden = self.dense.forward(hidden);
@@ -115,6 +136,26 @@ pub struct TransformerEncoderLayer<B: Backend> {
     final_layer_norm: LayerNorm<B>,
 }
 
+#[derive(Config)]
+pub struct TransformerEncoderLayerConfig {
+    num_heads: usize,
+    attention_dropout: f32,
+    ff_dropout: f32,
+    ff_intermediate_size: usize,
+}
+
+impl TransformerEncoderLayerConfig {
+    pub fn init<B: Backend>(self, hidden_size: usize) -> TransformerEncoderLayer<B> {
+        TransformerEncoderLayer {
+            encoder_attention: EncoderAttentionConfig::new(hidden_size, self.num_heads, true, self.attention_dropout).init(),
+            dropout: DropoutConfig::new(0.0).init(),
+            layer_norm: LayerNormConfig::new(hidden_size).init(&B::Device::default()),
+            feed_forward: EncoderFeedForwardConfig::new(self.ff_dropout, self.ff_intermediate_size, self.ff_dropout).init(hidden_size),
+            final_layer_norm: LayerNormConfig::new(hidden_size).init(&B::Device::default()),
+        }
+    }
+}
+
 impl<B: Backend> TransformerEncoderLayer<B> {
     pub fn forward(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 4>) -> Tensor<B, 3> {
         let residual_attention = hidden.clone();
@@ -130,12 +171,27 @@ impl<B: Backend> TransformerEncoderLayer<B> {
 
 #[derive(Config)]
 pub struct TransformerEncoderConfig {
+    pub num_layers: usize,
+    pub num_heads: usize,
+    pub attention_dropout: f32,
+    pub ff_dropout: f32,
+    pub ff_intermediate_size: usize,
+    pub num_posconv_embeddings: usize,
+    pub num_posconv_groups: usize,
+}
 
+impl EncoderConfig for TransformerEncoderConfig {
+    type Model<B> = TransformerEncoder<B> where B: Backend;
 }
 
 impl TransformerEncoderConfig {
-    pub fn init<B: Backend>(self) -> TransformerEncoder<B> {
-        todo!()
+    pub fn init<B: Backend>(self, hidden_size: usize,) -> TransformerEncoder<B> {
+        TransformerEncoder {
+            layers: (0..self.num_layers).map(|_| TransformerEncoderLayerConfig::new(self.num_heads, self.attention_dropout, self.ff_dropout, self.ff_intermediate_size).init(hidden_size)).collect_vec(),
+            pos_conv: PosConvConfig::new(hidden_size, self.num_posconv_embeddings, self.num_posconv_groups).init(),
+            dropout: DropoutConfig::new(0.0).init(),
+            layer_norm: LayerNormConfig::new(hidden_size).init(&B::Device::default()),
+        }
     }
 }
 
@@ -147,14 +203,16 @@ pub struct TransformerEncoder<B: Backend> {
     layers: Vec<TransformerEncoderLayer<B>>,
 }
 
+use num_traits::float::Float;
+
 impl<B: Backend> TransformerEncoder<B> {
     pub fn encode(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {
         let expanded_attention_mask = attention_mask.clone().unsqueeze_dim::<3>(2).repeat(2, hidden.dims()[2]);
         let hidden = hidden.mask_fill(expanded_attention_mask.bool_not(), 0);
 
-        let attention_mask = attention_mask.unsqueeze_dims(&[1, 2]).bool_not().float();
+        let attention_mask = attention_mask.unsqueeze_dims::<4>(&[1, 2]).bool_not().float();
         let attention_mask = attention_mask * f32::neg_infinity();
-        let attention_mask = attention_mask.expand([attention_mask.dims()[0], 1, attention_mask.dims()[3], attention_mask.dims()[3]]);
+        let attention_mask = attention_mask.clone().expand([attention_mask.clone().dims()[0], 1, attention_mask.dims()[3], attention_mask.dims()[3]]);
 
         let pos_embeddings = self.pos_conv.forward(hidden.clone());
         let hidden = hidden + pos_embeddings;
@@ -174,7 +232,7 @@ impl<B: Backend> Encoder<B> for TransformerEncoder<B> {
     type Config = TransformerEncoderConfig;
 
     fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize) -> Self {
-        config.init()
+        config.init(hidden_size)
     }
 
     fn forward(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {

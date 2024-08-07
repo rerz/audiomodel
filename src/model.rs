@@ -2,6 +2,7 @@ use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::prelude::Backend;
 use burn::tensor::{Bool, Tensor};
+use burn::tensor::backend::AutodiffBackend;
 use itertools::Itertools;
 use ndarray::AssignElem;
 
@@ -25,25 +26,25 @@ pub struct AudioModelConfig {
 }
 
 impl AudioModelConfig {
-    pub fn init<B: Backend, E: Encoder<B, Config=EC>, EC: EncoderConfig>(
+    pub fn init<B: Backend, EC: EncoderConfig>(
         self,
         input_len: usize,
         encoder_config: EC,
-    ) -> AudioModel<B, E> {
+    ) -> AudioModel<B, EC::Model<B>> {
         let last_conv_dims = self.feature_extractor_config.last_conv_dim();
         let extractor_output_len = self.feature_extractor_config.output_len::<B>(input_len);
 
         AudioModel {
             feature_extractor: self.feature_extractor_config.init(),
             feature_projection: self.feature_projection_config.init(),
-            encoder: E::new(encoder_config, self.hidden_size, extractor_output_len),
+            encoder: <EC::Model<B> as Encoder<B>>::new(encoder_config, self.hidden_size, extractor_output_len),
             mask: Param::from_tensor(Tensor::zeros([self.hidden_size], &B::Device::default())),
         }
     }
 }
 
 #[derive(Module, Debug)]
-pub struct AudioModel<B: Backend, E> {
+pub struct AudioModel<B: Backend, E: Module<B>> {
     feature_extractor: FeatureExtractor<B>,
     feature_projection: FeatureProjection<B>,
     encoder: E,
