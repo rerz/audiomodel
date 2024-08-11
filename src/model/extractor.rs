@@ -23,12 +23,12 @@ pub struct FeatureExtractorConvLayerConfig {
 }
 
 impl FeatureExtractorConvLayerConfig {
-    pub fn init<B: Backend>(self) -> FeatureExtractorConvLayer<B> {
+    pub fn init<B: Backend>(self, device: &B::Device) -> FeatureExtractorConvLayer<B> {
         FeatureExtractorConvLayer {
             conv: Conv1dConfig::new(self.conv_dim_in, self.conv_dim_out, self.conv_kernel)
                 .with_stride(self.conv_stride)
-                .init(&B::Device::default()),
-            norm: LayerNormConfig::new(self.conv_dim_out).init(&B::Device::default()),
+                .init(device),
+            norm: LayerNormConfig::new(self.conv_dim_out).init(device),
             activation: Gelu::new(),
         }
     }
@@ -47,12 +47,6 @@ impl<B: Backend> FeatureExtractorConvLayer<B> {
     }
 }
 
-impl<B: Backend> From<((&usize, &usize), &usize, &usize)> for FeatureExtractorConvLayer<B> {
-    fn from(((in_dim, out_dim), kernel, stride): ((&usize, &usize), &usize, &usize)) -> Self {
-        FeatureExtractorConvLayerConfig::new(*in_dim, *out_dim, *kernel, *stride).init()
-    }
-}
-
 #[derive(Config)]
 pub struct FeatureExtractorConfig {
     pub conv_dims: Vec<usize>,
@@ -61,12 +55,12 @@ pub struct FeatureExtractorConfig {
 }
 
 impl FeatureExtractorConfig {
-    pub fn init<B: Backend>(self) -> FeatureExtractor<B> {
+    pub fn init<B: Backend>(self, device: &B::Device) -> FeatureExtractor<B> {
         let dim_windows = self.conv_dims.iter().tuple_windows::<(_, _)>();
 
         FeatureExtractor {
             conv_layers: izip!(dim_windows, &self.conv_kernels, &self.conv_strides)
-                .map(FeatureExtractorConvLayer::from)
+                .map(|((in_dim, out_dim), kernel, stride)| FeatureExtractorConvLayerConfig::new(*in_dim, *out_dim, *kernel, *stride).init(device))
                 .collect_vec(),
             kernel_sizes: self.conv_kernels,
             strides: self.conv_strides,
@@ -90,6 +84,10 @@ pub struct FeatureExtractor<B: Backend> {
     conv_layers: Vec<FeatureExtractorConvLayer<B>>,
 }
 
+pub fn has_nan<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> bool {
+    tensor.to_data().to_vec::<f32>().unwrap().into_iter().any(|val| val.is_nan())
+}
+
 impl<B: Backend> FeatureExtractor<B> {
     pub fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 3> {
         let mut hidden = input.unsqueeze_dim(1);
@@ -107,6 +105,10 @@ impl<B: Backend> FeatureExtractor<B> {
 
     pub fn strides(&self) -> &[usize] {
         &self.strides
+    }
+
+    pub fn output_len(&self, input_len: usize) -> usize {
+        feature_extractor_output_lens::<B>(vec![input_len], &self.kernel_sizes, &self.strides)[0]
     }
 }
 

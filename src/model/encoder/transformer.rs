@@ -185,12 +185,12 @@ impl EncoderConfig for TransformerEncoderConfig {
 }
 
 impl TransformerEncoderConfig {
-    pub fn init<B: Backend>(self, hidden_size: usize,) -> TransformerEncoder<B> {
+    pub fn init<B: Backend>(self, hidden_size: usize, device: &B::Device) -> TransformerEncoder<B> {
         TransformerEncoder {
             layers: (0..self.num_layers).map(|_| TransformerEncoderLayerConfig::new(self.num_heads, self.attention_dropout, self.ff_dropout, self.ff_intermediate_size).init(hidden_size)).collect_vec(),
-            pos_conv: PosConvConfig::new(hidden_size, self.num_posconv_embeddings, self.num_posconv_groups).init(),
+            pos_conv: PosConvConfig::new(hidden_size, self.num_posconv_embeddings, self.num_posconv_groups).init(device),
             dropout: DropoutConfig::new(0.0).init(),
-            layer_norm: LayerNormConfig::new(hidden_size).init(&B::Device::default()),
+            layer_norm: LayerNormConfig::new(hidden_size).init(device),
         }
     }
 }
@@ -207,7 +207,7 @@ use num_traits::float::Float;
 
 impl<B: Backend> TransformerEncoder<B> {
     pub fn encode(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {
-        let expanded_attention_mask = attention_mask.clone().unsqueeze_dim::<3>(2).repeat(2, hidden.dims()[2]);
+        let expanded_attention_mask = attention_mask.clone().unsqueeze_dim::<3>(2).repeat(&[1, 1, hidden.dims()[2]]);
         let hidden = hidden.mask_fill(expanded_attention_mask.bool_not(), 0);
 
         let attention_mask = attention_mask.unsqueeze_dims::<4>(&[1, 2]).bool_not().float();
@@ -231,8 +231,8 @@ impl<B: Backend> TransformerEncoder<B> {
 impl<B: Backend> Encoder<B> for TransformerEncoder<B> {
     type Config = TransformerEncoderConfig;
 
-    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize) -> Self {
-        config.init(hidden_size)
+    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize, device: &B::Device) -> Self {
+        config.init(hidden_size, device)
     }
 
     fn forward(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {

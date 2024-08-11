@@ -20,11 +20,11 @@ pub struct FeatureProjectionConfig {
 }
 
 impl FeatureProjectionConfig {
-    pub fn init<B: Backend>(self) -> FeatureProjection<B> {
+    pub fn init<B: Backend>(self, device: &B::Device) -> FeatureProjection<B> {
         FeatureProjection {
             linear: LinearConfig::new(self.last_conv_dim, self.hidden_size)
-                .init(&B::Device::default()),
-            norm: LayerNormConfig::new(self.last_conv_dim).init(&B::Device::default()),
+                .init(device),
+            norm: LayerNormConfig::new(self.last_conv_dim).init(device),
             dropout: DropoutConfig::new(self.dropout as f64).init(),
         }
     }

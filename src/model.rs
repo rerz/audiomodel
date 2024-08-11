@@ -8,7 +8,8 @@ use ndarray::AssignElem;
 
 use crate::mask;
 use crate::model::encoder::{Encoder, EncoderConfig};
-use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig};
+use crate::model::encoder::transformer::{TransformerEncoder, TransformerEncoderConfig};
+use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig, has_nan};
 use crate::model::projection::{FeatureProjection, FeatureProjectionConfig};
 
 pub mod encoder;
@@ -30,21 +31,22 @@ impl AudioModelConfig {
         self,
         input_len: usize,
         encoder_config: EC,
+        device: &B::Device,
     ) -> AudioModel<B, EC::Model<B>> {
         let last_conv_dims = self.feature_extractor_config.last_conv_dim();
         let extractor_output_len = self.feature_extractor_config.output_len::<B>(input_len);
 
         AudioModel {
-            feature_extractor: self.feature_extractor_config.init(),
-            feature_projection: self.feature_projection_config.init(),
-            encoder: <EC::Model<B> as Encoder<B>>::new(encoder_config, self.hidden_size, extractor_output_len),
-            mask: Param::from_tensor(Tensor::zeros([self.hidden_size], &B::Device::default())),
+            feature_extractor: self.feature_extractor_config.init(device),
+            feature_projection: self.feature_projection_config.init(device),
+            encoder: <EC::Model<B> as Encoder<B>>::new(encoder_config, self.hidden_size, extractor_output_len, device),
+            mask: Param::from_tensor(Tensor::zeros([self.hidden_size], device)),
         }
     }
 }
 
 #[derive(Module, Debug)]
-pub struct AudioModel<B: Backend, E: Module<B>> {
+pub struct AudioModel<B: Backend, E> {
     feature_extractor: FeatureExtractor<B>,
     feature_projection: FeatureProjection<B>,
     encoder: E,
@@ -72,14 +74,19 @@ impl<B: Backend, E: Encoder<B>> AudioModel<B, E> {
             seq_lens,
             masked_time_steps
         }: AudioModelInput<B>,
+        device: &B::Device,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let features = self.feature_extractor.forward(inputs);
         let features = features.swap_dims(1, 2);
 
+
         let feature_space_attention_mask =
-            mask::feature_space_attention_mask(features.dims()[1], seq_lens, self.feature_extractor.kernel_sizes(), self.feature_extractor.strides());
+            mask::feature_space_attention_mask(features.dims()[1], seq_lens, self.feature_extractor.kernel_sizes(), self.feature_extractor.strides(), device);
+
+
 
         let (hidden, features) = self.feature_projection.forward(features);
+
 
         let hidden = mask::mask_hidden_states(
             hidden,
@@ -88,7 +95,9 @@ impl<B: Backend, E: Encoder<B>> AudioModel<B, E> {
             feature_space_attention_mask.clone(),
         );
 
+
         let encoder_output = self.encoder.forward(hidden, feature_space_attention_mask);
+
 
         (encoder_output, features)
     }

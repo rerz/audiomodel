@@ -4,6 +4,7 @@ pub mod mine;
 pub mod model;
 pub mod util;
 pub mod data;
+mod io;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

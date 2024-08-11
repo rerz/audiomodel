@@ -1,6 +1,8 @@
-use burn::backend::{Autodiff, LibTorch, NdArray};
+use burn::backend::{Autodiff, LibTorch, NdArray, Wgpu};
 use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
 use burn::backend::libtorch::LibTorchDevice;
+use burn::backend::ndarray::NdArrayDevice;
+use burn::backend::wgpu::WgpuDevice;
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::DataLoaderBuilder;
 use burn::optim::AdamWConfig;
@@ -24,5 +26,5 @@ pub struct ParquetBatcher {
 //impl Batcher<>
 
 fn main() {
-    pretrain::<Autodiff<LibTorch>>(LibTorchDevice::default());
+    pretrain::<Autodiff<Wgpu>>(WgpuDevice::DiscreteGpu(0));
 }

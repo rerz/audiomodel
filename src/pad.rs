@@ -1,5 +1,6 @@
 use burn::prelude::Backend;
-use burn::tensor::{Int, Tensor};
+use burn::tensor::{Bool, Int, Tensor};
+use tch::nn::seq;
 use unzip3::Unzip3;
 
 use crate::data::AudioBatch;
@@ -22,6 +23,8 @@ pub fn trim_sequence(mut sequence: Vec<f32>, len: usize) -> (Vec<f32>, usize) {
 
     sequence.truncate(len);
 
+    assert_eq!(sequence.len(), len);
+
     (sequence, original_len)
 }
 
@@ -31,6 +34,8 @@ pub fn pad_sequence(mut sequence: Vec<f32>, len: usize) -> (Vec<f32>, usize) {
     assert!(len >= original_len);
 
     sequence.extend(vec![0.0; len - original_len]);
+
+    assert_eq!(sequence.len(), len);
 
     (sequence, original_len)
 }
@@ -46,29 +51,41 @@ fn pad_or_trim(sequences: Vec<Vec<f32>>, len: usize) -> Vec<(Vec<f32>, usize)> {
         .collect::<Vec<_>>()
 }
 
-pub fn pad_sequences<B: Backend>(sequences: Vec<Vec<f32>>, padding: PaddingType) -> AudioBatch<B> {
-    let sequences_and_lens = match padding {
-        PaddingType::Explicit(length) => pad_or_trim(sequences, length),
-        PaddingType::LongestSequence => {
-            let max_len = sequences.iter().map(Vec::len).max().unwrap();
-            pad_or_trim(sequences, max_len)
-        }
+pub struct PaddedSequences<B: Backend> {
+    pub sequences: Tensor<B, 2>,
+    pub attention_mask: Tensor<B, 2, Bool>,
+    pub sequence_lens: Vec<usize>,
+}
+
+pub fn pad_sequences<B: Backend>(sequences: Vec<Vec<f32>>, padding: PaddingType, device: &B::Device) -> PaddedSequences<B> {
+    let max_len = match padding {
+        PaddingType::Explicit(len) => len,
+        PaddingType::LongestSequence => sequences.iter().map(Vec::len).max().unwrap()
     };
+
+    let sequences_and_lens = pad_or_trim(sequences, max_len);
 
     let (sequences, masks, lens) = sequences_and_lens
         .into_iter()
-        .map(|(sequence, len)| {
-            let mut mask = vec![1; len];
-            mask.extend(vec![0; sequence.len() - len]);
+        .map(|(sequence, mut len)| {
+            if len >= max_len {
+                len = max_len;
+            }
 
-            let sequence = Tensor::<B, 1>::from_floats(&*sequence, &B::Device::default());
-            let mask = Tensor::<B, 1, Int>::from_ints(&*mask, &B::Device::default());
+            let mut mask = vec![1usize; len];
+            let result = usize::checked_sub(sequence.len(), len);
+            if result.is_none() {
+                panic!("{}", format!("{} - {}", sequence.len(), len));
+            }
+            mask.extend(vec![0; sequence.len() - len]);
+            let sequence = Tensor::<B, 1>::from_floats(&*sequence, device);
+            let mask = Tensor::<B, 1, Int>::from_ints(&*mask, device).bool();
 
             (sequence, mask, len)
         })
         .unzip3();
 
-    AudioBatch {
+    PaddedSequences {
         sequences: Tensor::stack(sequences, 0),
         attention_mask: Tensor::stack(masks, 0),
         sequence_lens: lens,

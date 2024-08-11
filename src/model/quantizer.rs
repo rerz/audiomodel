@@ -21,7 +21,8 @@ pub trait Quantizer<B: Backend>: Module<B> {
         &self,
         features: Tensor<B, 3>,
         mask_time_steps: Tensor<B, 2, Bool>,
-    ) -> (Tensor<B, 3>, f32);
+        device: &B::Device,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>);
 
     fn num_groups(&self) -> usize;
 

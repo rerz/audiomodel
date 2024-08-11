@@ -32,13 +32,13 @@ pub struct PosConvConfig {
 }
 
 impl PosConvConfig {
-    pub fn init<B: Backend>(self) -> PosConv<B> {
+    pub fn init<B: Backend>(self, device: &B::Device) -> PosConv<B> {
         PosConv {
             conv: Conv1dConfig::new(self.hidden_size, self.hidden_size, self.num_embeddings)
                 .with_stride(1)
                 .with_padding(PaddingConfig1d::Explicit(self.num_embeddings / 2))
                 .with_groups(self.num_groups)
-                .init(&B::Device::default()),
+                .init(device),
             activation: Gelu::new(),
         }
     }

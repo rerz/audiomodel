@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-burn = { version = "0.13.2", features = ["tch", "ndarray", "train", "autodiff"] }
+burn = { git = "https://github.com/tracel-ai/burn", features = ["tch", "ndarray", "train", "autodiff", "wgpu"] }
 color-eyre = "0.6.3"
 itertools = "0.13.0"
 ndarray = "0.15.6"
@@ -17,3 +17,8 @@ hf-hub = "0.3.2"
 thiserror = "1.0.63"
 num-traits = "0.2.19"
 burn-autodiff = "0.13.2"
+parquet_derive = "52.2.0"
+rmp3 = { version = "0.3.1", features = ["float", "std"] }
+wavers = { version = "1.4.3", features = [] }
+soa_derive = "0.13.0"
+flate2 = "1.0.31"
