@@ -1,12 +1,13 @@
 use std::fs::File;
+
 use burn::prelude::Backend;
-use hf_hub::api::sync::{Api, ApiRepo};
 use hf_hub::{Repo, RepoType};
+use hf_hub::api::sync::{Api, ApiRepo};
 use itertools::Itertools;
 use parquet::file::reader::SerializedFileReader;
+use parquet::record::Row;
 use rand::{Rng, thread_rng};
 
-use crate::data::AudioBatch;
 use crate::pad::{pad_sequences, PaddedSequences, PaddingType};
 
 pub(crate) fn sample_sequence(min_len: usize, max_len: usize) -> Vec<f32> {
@@ -54,8 +55,13 @@ fn sibling_to_parquet(
     Ok(reader)
 }
 
-pub fn download_hf_dataset(api: &Api, dataset_id: String) -> Result<Vec<SerializedFileReader<File>>, Error> {
-        let repo = Repo::with_revision(
+pub enum Split<T> {
+    Test(T),
+    Train(T),
+}
+
+pub fn download_hf_dataset(api: &Api, dataset_id: String) -> Result<(impl Iterator<Item=Row>, impl Iterator<Item=Row>), Error> {
+    let repo = Repo::with_revision(
         dataset_id,
         RepoType::Dataset,
         "refs/convert/parquet".to_string(),
@@ -63,20 +69,23 @@ pub fn download_hf_dataset(api: &Api, dataset_id: String) -> Result<Vec<Serializ
     let repo = api.repo(repo);
     let info = repo.info()?;
 
-    let files: Result<Vec<_>, _> = info
-        .siblings
-        .into_iter()
-        .filter_map(|s| -> Option<Result<_, _>> {
-            let filename = s.rfilename;
-            if filename.ends_with(".parquet") {
-                let reader_result = sibling_to_parquet(&filename, &repo);
-                Some(reader_result)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let files = files?;
+    let mut train = vec![];
+    let mut test = vec![];
 
-    Ok(files)
+    for sibling in info.siblings {
+        let filename = sibling.rfilename;
+        if filename.ends_with(".parquet") {
+            let reader_result = sibling_to_parquet(&filename, &repo);
+            if filename.contains("test") {
+                test.push(reader_result.unwrap());
+            } else if filename.contains("train") {
+                train.push(reader_result.unwrap());
+            }
+        }
+    }
+
+    Ok((
+        train.into_iter().flat_map(|file| file.into_iter().filter_map(Result::ok)),
+        test.into_iter().flat_map(|file| file.into_iter().filter_map(Result::ok))
+    ))
 }

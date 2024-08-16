@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::iter;
+
 use itertools::Itertools;
 use rmp3::{DecoderOwned, Frame};
 
@@ -26,7 +27,7 @@ fn read_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
             _ => None,
         }
     })
-    .unzip();
+        .unzip();
 
     let sample_rates = sample_rates.into_iter().unique().collect_vec();
 

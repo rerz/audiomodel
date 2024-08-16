@@ -5,6 +5,7 @@ pub mod model;
 pub mod util;
 pub mod data;
 mod io;
+mod config;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

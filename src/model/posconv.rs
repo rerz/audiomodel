@@ -26,9 +26,9 @@ pub struct PosConv<B: Backend> {
 
 #[derive(Config)]
 pub struct PosConvConfig {
-    hidden_size: usize,
-    num_embeddings: usize,
-    num_groups: usize,
+    pub hidden_size: usize,
+    pub num_embeddings: usize,
+    pub num_groups: usize,
 }
 
 impl PosConvConfig {

@@ -5,7 +5,7 @@ use burn::prelude::{Backend, ElementConversion};
 use burn::tensor::{Bool, Distribution, Tensor};
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::metric::state::NumericMetricState;
+use crate::model::extractor::has_nan;
 
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
 

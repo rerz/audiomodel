@@ -9,11 +9,12 @@ use burn::module::{AutodiffModule, Module, ModuleDisplay};
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::optim::AdamWConfig;
-use burn::prelude::{Backend, Int};
+use burn::prelude::{Backend, ElementConversion, Int};
 use burn::tensor::{Bool, Tensor};
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
-use burn::train::metric::{Adaptor, LossInput, LossMetric};
+use burn::train::metric::{Adaptor, LossInput, LossMetric, Metric, MetricEntry, MetricMetadata, Numeric};
+use burn::train::metric::state::{FormatOptions, NumericMetricState};
 use itertools::Itertools;
 use num_traits::real::Real;
 use parquet::data_type::AsBytes;
@@ -24,6 +25,7 @@ use crate::data::{AudioBatch, AudioBatcher, AudioItem, AudioItemVec};
 use crate::mine::get_negative_samples;
 use crate::model::{AudioModel, AudioModelConfig, AudioModelInput};
 use crate::model::encoder::{Encoder, EncoderConfig};
+use crate::model::encoder::burn_transformer::BurnTransformer;
 use crate::model::encoder::transformer::TransformerEncoderConfig;
 use crate::model::extractor::FeatureExtractorConfig;
 use crate::model::projection::FeatureProjectionConfig;
@@ -79,34 +81,24 @@ pub struct Pretrain<B: Backend, E, Q> {
 }
 
 
-fn l2<B: Backend, const D: usize>(tensor: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
+fn l2<B: Backend, const D: usize>(tensor: Tensor<B, D>, dim: usize) -> Tensor<B, 1> {
     let squared = tensor.powi_scalar(2);
-    let summed = squared.sum_dim(dim);
+    let summed = squared.sum();
     let norm = summed.sqrt();
     norm
 }
 
 fn cosine_similarity<B: Backend, const D: usize>(a: Tensor<B, D>, b: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
     let dot = Tensor::sum_dim(a.clone() * b.clone(), dim);
-    let norm_a = l2(a, dim);
-    let norm_b = l2(b, dim);
+    let norm_a = l2(a, dim).to_data().to_vec::<B::FloatElem>().unwrap()[0].elem::<f32>();
+    let norm_b = l2(b, dim).to_data().to_vec::<B::FloatElem>().unwrap()[0].elem::<f32>();
+
+    let norm_a = f32::max(norm_a, 1e-8);
+    let norm_b = f32::max(norm_b, 1e-8);
 
     let sim = dot / (norm_a * norm_b);
 
     sim
-}
-
-fn contrastive_logits<B: Backend>(
-    target_features: Tensor<B, 4>,
-    negative_features: Tensor<B, 4>,
-    predicted_features: Tensor<B, 3>,
-    temperature: f32,
-) -> Tensor<B, 4> {
-    let target_features = Tensor::cat(vec![target_features, negative_features], 0);
-
-    let logits = cosine_similarity(predicted_features.unsqueeze_dim(0), target_features, 2);
-
-    logits / temperature
 }
 
 pub struct PretrainInput<B: Backend> {
@@ -129,7 +121,7 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
         masked_time_steps: Tensor<B, 2, Bool>,
         sampled_negatives: Tensor<B, 3, Int>,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>) {
         let [batch, seq] = inputs.dims();
 
         let (last_hidden, features) = self.model.forward(
@@ -138,8 +130,9 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
                 seq_lens: seq_lens.clone(),
                 masked_time_steps: masked_time_steps.clone(),
             },
-            device
+            device,
         );
+
 
         let predicted_features = self.project_hidden.forward(last_hidden.clone());
         let predicted_features = predicted_features.unsqueeze_dim(0);
@@ -149,11 +142,12 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
             .quantizer
             .forward::<true>(extracted_features, masked_time_steps.clone(), device);
 
+
         let quantized_features = self.project_quantized.forward(quantized_features);
-        let quantized_features = quantized_features.unsqueeze_dim::<4>(0);
 
         let negative_features = get_negative_samples(sampled_negatives, quantized_features.clone());
 
+        let quantized_features = quantized_features.unsqueeze_dim::<4>(0);
         // quantized features: 1 x batch x ?? x mask_len
         // negative_features: num_negatives x batch x ?? x mask_len
         // projected_features: 1 x batch x ?? x mask_len
@@ -169,40 +163,38 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
 
         // TODO: neg is pos thing
 
-        let mask_dims = masked_time_steps.dims();
-        let logit_dims = contrastive_logits.dims();
-
         let logits = contrastive_logits
             .clone()
             .swap_dims(0, 2)
             .reshape([-1, contrastive_logits.dims()[0] as i32]); // (batch x hidden) x (num_negatives + 1)
 
-        // batch_x_time x num_negatives + 1
-        let logit_dims = logits.dims();
+        let unmasked_indices = masked_time_steps.clone().bool_not().nonzero()[1].clone();
 
+        // ignoring indices in cross entropy loss seems broken so we just remove them from the tensor
+        let unmasked_logits = Tensor::select(logits, 0, unmasked_indices.clone());
 
-        let extracted_seq_len = self.model.feature_extractor.output_len(seq);
+        // let target = masked_time_steps.clone().bool_not()
+        //     .int()
+        //     .swap_dims(0, 1)
+        //     .flatten(0, 1);
 
-        // TODO: pytorch cross entropy loss ignores -100 target values, needs a workaround
-        let target = (masked_time_steps.clone().bool_not().float() * 5)
-            .int()
-            .swap_dims(0, 1)
-            .flatten(0, 1);
+        let target = Tensor::zeros([unmasked_logits.dims()[0]], device);
 
-        let target_dims = target.dims();
+        //let unmasked_targets = Tensor::select(target, 0, unmasked_indices);
+
+        //println!("{}", unmasked_targets);
 
         let num_code_vectors = self.quantizer.num_groups() * self.quantizer.num_vectors_per_group();
 
-        let contrastive_loss = self.loss.forward(logits, target);//.sum();
+        let contrastive_loss = self.loss.forward(unmasked_logits, target);//.sum();
 
-        let perplexity = perplexity.to_data().to_vec::<f32>().unwrap()[0];
         let diversity_loss =
-            masked_time_steps.clone().float().sum() * ((num_code_vectors as f32 - perplexity) / num_code_vectors as f32);
+            masked_time_steps.clone().float().sum() * ((num_code_vectors as f32 - perplexity.clone().to_data().to_vec::<f32>().unwrap()[0]) / num_code_vectors as f32);
 
         let diversity_loss_weight = 0.1;
         let loss = contrastive_loss + diversity_loss * diversity_loss_weight;
 
-        (last_hidden, loss)
+        (last_hidden, loss, perplexity)
     }
 
     fn contrastive_logits(
@@ -221,7 +213,7 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
     }
 }
 
-fn decode_row(row: &Row) -> AudioItem {
+fn decode_row(row: Row) -> AudioItem {
     let group = row.get_group(0).unwrap();
     let mut audio = group.get_bytes(0).unwrap().as_bytes().to_vec();
 
@@ -255,7 +247,8 @@ fn decode_row(row: &Row) -> AudioItem {
 
 pub struct PretrainStepOutput<B: Backend> {
     hidden: Tensor<B, 3>,
-    loss: Tensor<B, 1>
+    loss: Tensor<B, 1>,
+    perplexity: Tensor<B, 1>,
 }
 
 impl<B: Backend> Adaptor<LossInput<B>> for PretrainStepOutput<B> {
@@ -264,9 +257,35 @@ impl<B: Backend> Adaptor<LossInput<B>> for PretrainStepOutput<B> {
     }
 }
 
-impl<B: AutodiffBackend, E: Encoder<B> + AutodiffModule<B> + ModuleDisplay, Q: Quantizer<B> + AutodiffModule<B> + ModuleDisplay> TrainStep<AudioBatch<B>, PretrainStepOutput<B>> for Pretrain<B, E, Q> where <E as AutodiffModule<B>>::InnerModule: ModuleDisplay, <Q as AutodiffModule<B>>::InnerModule: ModuleDisplay {
+#[derive(Default)]
+pub struct PerplexityMetric<B: Backend> {
+    state: NumericMetricState,
+    _phantom: PhantomData<B>
+}
+
+impl<B: Backend> Metric for PerplexityMetric<B> {
+    const NAME: &'static str = "Perplexity";
+    type Input = Tensor<B, 1>;
+
+    fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
+        let perplexity = item.to_data().to_vec::<f32>().unwrap()[0];
+        self.state.update(perplexity as f64, 1, FormatOptions::new("Perplexity").precision(3))
+    }
+
+    fn clear(&mut self) {
+        self.state.reset();
+    }
+}
+
+impl<B: Backend> Adaptor<Tensor<B, 1>> for PretrainStepOutput<B> {
+    fn adapt(&self) -> Tensor<B, 1> {
+        self.perplexity.clone()
+    }
+}
+
+impl<B: AutodiffBackend, E: Encoder<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay, Q: Quantizer<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay> TrainStep<AudioBatch<B>, PretrainStepOutput<B>> for Pretrain<B, E, Q> {
     fn step(&self, item: AudioBatch<B>) -> TrainOutput<PretrainStepOutput<B>> {
-        let (hidden, loss) = self.forward(
+        let (hidden, loss, perplexity) = self.forward(
             item.sequences,
             item.attention_mask,
             item.sequence_lens,
@@ -278,6 +297,7 @@ impl<B: AutodiffBackend, E: Encoder<B> + AutodiffModule<B> + ModuleDisplay, Q: Q
         TrainOutput::new(self, loss.backward(), PretrainStepOutput {
             loss,
             hidden,
+            perplexity
         })
     }
 }
@@ -288,84 +308,51 @@ impl<B: Backend, E: Encoder<B>, Q: Quantizer<B>> ValidStep<AudioBatch<B>, ()> fo
     }
 }
 
+impl<B: Backend> Numeric for PerplexityMetric<B> {
+    fn value(&self) -> f64 {
+        self.state.value()
+    }
+}
+
+pub fn train_with_learner_builder() {}
+
+pub fn train_with_custom_loop() {}
+
 pub fn pretrain<B: AutodiffBackend>(device: B::Device) {
-    let hidden_size = 80;
+    let (pretrain_config, encoder_config, quantizer_config) = crate::config::small_music::small_music_config::<B>();
 
-    let feature_extractor_config = FeatureExtractorConfig {
-        conv_dims: vec![1, 8, 16, 32, 64],
-        conv_kernels: vec![3, 3, 2, 2],
-        conv_strides: vec![2, 2, 2, 2],
-    };
+    let model = pretrain_config.clone().init(100_000, encoder_config, quantizer_config, &device);
 
-    let feature_projection_config = FeatureProjectionConfig {
-        hidden_size,
-        dropout: 0.0,
-        last_conv_dim: feature_extractor_config.last_conv_dim(),
-        layer_norm_eps: 1e-8,
-    };
+    let (train_rows, test_rows) = download_hf_dataset(&hf_hub::api::sync::Api::new().unwrap(), "lewtun/music_genres".into()).unwrap();
 
-    let model_config = AudioModelConfig {
-        hidden_size,
-        feature_extractor_config,
-        feature_projection_config,
-    };
+    let train_items = AudioItemVec::from_iter(train_rows.map(decode_row).take(10_000));
+    let test_items = AudioItemVec::from_iter(test_rows.map(decode_row).take(10_000));
 
-    let encoder_config = TransformerEncoderConfig {
-        num_heads: 4,
-        num_layers: 3,
-        ff_intermediate_size: 100,
-        ff_dropout: 0.0,
-        attention_dropout: 0.0,
-        num_posconv_groups: 20,
-        num_posconv_embeddings: 50,
-    };
-
-    let quantizer_config = GumbelQuantizerConfig {
-        num_groups: 4,
-        vectors_per_group: 10,
-        vector_dim: 100,
-    };
-
-
-    let pretraining_config = PretrainConfig {
-        model_config: model_config.clone(),
-        feature_dropout: 0.0,
-        projected_size: 100,
-    };
-
-
-    let mut dataset = download_hf_dataset(&hf_hub::api::sync::Api::new().unwrap(), "lewtun/music_genres_small".into()).unwrap();
-    let dataset = dataset.remove(0);
-
-    let items = AudioItemVec::from_iter(dataset.into_iter().map(|row| decode_row(&row.unwrap())));
-
-    let dataset = InMemDataset::new(items.into_iter().map(|i| i.to_owned()).collect_vec());
-    let batcher = AudioBatcher::new(model_config.clone(), device.clone());
+    let dataset = InMemDataset::new(train_items.into_iter().map(|i| i.to_owned()).collect_vec());
+    let batcher = AudioBatcher::<B>::new(pretrain_config.model_config.clone(), device.clone());
     let data_loader_train = DataLoaderBuilder::new(batcher)
-        .batch_size(4)
+        .batch_size(12)
         .num_workers(1)
         .build(dataset);
 
 
-    let dataset = InMemDataset::new(items.into_iter().map(|i| i.to_owned()).collect_vec());
-    let batcher = AudioBatcher::new(model_config, device.clone());
+    let dataset = InMemDataset::new(test_items.into_iter().map(|i| i.to_owned()).collect_vec());
+    let batcher = AudioBatcher::<B::InnerBackend>::new(pretrain_config.model_config, device.clone());
     let data_loader_test = DataLoaderBuilder::new(batcher)
         .batch_size(4)
         .num_workers(1)
         .build(dataset);
 
-    let model = pretraining_config.init::<B, _, GumbelQuantizerConfig>(100_000, (), quantizer_config, &device);
+    TrainStep::step(&model, data_loader_train.iter().next().unwrap());
 
-    //let batch = data_loader_train.iter().next().unwrap();
-    //model.forward(batch.sequences, batch.attention_mask, batch.sequence_lens, batch.masked_time_indices, batch.sampled_negative_indices, &device);
+    let optimizer = AdamWConfig::new().init();
 
-    let optimizer = AdamWConfig::new().init::<B, Pretrain<_, _, _>>();
-
-    let learner = LearnerBuilder::<B, _, _, Pretrain<_, _, _>, _, _>::new(".out")
+    let learner = LearnerBuilder::new(".out")
         .devices(vec![device])
-        .metric_train(LossMetric::new())
+        .metric_train_numeric(LossMetric::new())
+        .metric_train_numeric(PerplexityMetric::default())
         .num_epochs(500)
         .summary()
-        .build(model, optimizer, 0.001);
+        .build(model, optimizer, 0.00001);
     let trained = learner.fit(data_loader_train, data_loader_test);
 }

@@ -6,6 +6,8 @@ use burn::tensor::{Bool, Tensor};
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::AutodiffBackend;
 use itertools::Itertools;
+use num_traits::float::Float;
+
 use crate::model::encoder::{Encoder, EncoderConfig};
 use crate::model::posconv::{PosConv, PosConvConfig};
 
@@ -202,8 +204,6 @@ pub struct TransformerEncoder<B: Backend> {
     dropout: Dropout,
     layers: Vec<TransformerEncoderLayer<B>>,
 }
-
-use num_traits::float::Float;
 
 impl<B: Backend> TransformerEncoder<B> {
     pub fn encode(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {

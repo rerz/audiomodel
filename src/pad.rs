@@ -1,9 +1,6 @@
 use burn::prelude::Backend;
 use burn::tensor::{Bool, Int, Tensor};
-use tch::nn::seq;
 use unzip3::Unzip3;
-
-use crate::data::AudioBatch;
 
 pub enum Padding {
     Left(usize),

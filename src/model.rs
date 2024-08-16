@@ -8,8 +8,7 @@ use ndarray::AssignElem;
 
 use crate::mask;
 use crate::model::encoder::{Encoder, EncoderConfig};
-use crate::model::encoder::transformer::{TransformerEncoder, TransformerEncoderConfig};
-use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig, has_nan};
+use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig};
 use crate::model::projection::{FeatureProjection, FeatureProjectionConfig};
 
 pub mod encoder;
@@ -18,6 +17,7 @@ pub mod posconv;
 pub mod projection;
 pub mod quantizer;
 pub mod pretrain;
+mod posenc;
 
 #[derive(Config)]
 pub struct AudioModelConfig {
@@ -82,7 +82,6 @@ impl<B: Backend, E: Encoder<B>> AudioModel<B, E> {
 
         let feature_space_attention_mask =
             mask::feature_space_attention_mask(features.dims()[1], seq_lens, self.feature_extractor.kernel_sizes(), self.feature_extractor.strides(), device);
-
 
 
         let (hidden, features) = self.feature_projection.forward(features);

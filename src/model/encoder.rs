@@ -5,6 +5,7 @@ use burn::tensor::Bool;
 
 pub mod linear;
 pub mod transformer;
+pub mod burn_transformer;
 
 pub trait EncoderConfig {
     type Model<B>: Encoder<B, Config=Self> where B: Backend;
