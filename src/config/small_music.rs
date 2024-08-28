@@ -11,12 +11,12 @@ use crate::model::quantizer::gumbel::GumbelQuantizerConfig;
 use crate::model::quantizer::QuantizerConfig;
 
 pub fn small_music_config<B: Backend>() -> (PretrainConfig, BurnTransformerEncoderConfig, GumbelQuantizerConfig) {
-    let hidden_size = 128;
+    let hidden_size = 512;
 
     let feature_extractor_config = FeatureExtractorConfig {
-        conv_dims: vec![1, 128, 128, 128, 128, 128],
-        conv_kernels: vec![10, 3, 3, 3, 3],
-        conv_strides: vec![5, 2, 2, 2, 2],
+        conv_dims: vec![1, 512, 512, 512, 512, 512, 512, 512],
+        conv_kernels: vec![10, 3, 3, 3, 3, 2, 2],
+        conv_strides: vec![5, 2, 2, 2, 2, 2, 2],
     };
 
     let last_conv_dim = feature_extractor_config.last_conv_dim();
@@ -36,23 +36,23 @@ pub fn small_music_config<B: Backend>() -> (PretrainConfig, BurnTransformerEncod
 
     let encoder_config = BurnTransformerEncoderConfig {
         pos_conv_config: PosConvConfig {
-            num_groups: 8,
+            num_groups: 16,
             hidden_size,
-            num_embeddings: 64,
+            num_embeddings: 128,
         },
-        num_layers: 2,
-        num_heads: 2,
+        num_layers: 12,
+        num_heads: 12,
     };
 
     let quantizer_config = GumbelQuantizerConfig {
-        vector_dim: 128,
-        vectors_per_group: 128,
-        num_groups: 4,
+        vector_dim: 256,
+        vectors_per_group: 320,
+        num_groups: 2,
     };
 
     (PretrainConfig {
         model_config,
-        projected_size: 128,
+        projected_size: 256,
         feature_dropout: 0.1,
     }, encoder_config, quantizer_config)
 }

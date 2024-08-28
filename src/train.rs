@@ -101,9 +101,9 @@ pub fn pretrain<B: AutodiffBackend>(
             .init(input_len, encoder_config, quantizer_config, &device);
 
     let mask_config = BlockMaskConfig {
-        mask_prob: 0.1,
-        mask_len: 100,
-        min_masks: 8,
+        mask_prob: 0.5,
+        mask_len: 10,
+        min_masks: 1,
     };
 
     let batcher = AudioBatcher::<B, BlockMask>::new(
@@ -113,7 +113,7 @@ pub fn pretrain<B: AutodiffBackend>(
         device.clone(),
     );
     let data_loader_train = DataLoaderBuilder::new(batcher)
-        .batch_size(16)
+        .batch_size(32)
         .num_workers(1)
         .shuffle(0)
         .build(dataset_train);
@@ -136,7 +136,7 @@ pub fn pretrain<B: AutodiffBackend>(
         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
         .init();
 
-    let scheduler = PolynomialDecay::new(0.0005, 0.0, 1.0, 300_000, 100_000);
+    let scheduler = PolynomialDecay::new(0.005, 0.0, 1.0, 1_200_000, 300_000);
 
     let learner = LearnerBuilder::new(".out")
         .devices(vec![device])
