@@ -112,15 +112,15 @@ fn test_get_negative_samples() {
         &device
     );
 
-    get_negative_samples(negative_indices, Tensor::random([2, 20, 5], Distribution::Default, &device));
+    get_negative_samples(negative_indices, Tensor::random([2, 20, 1, 5], Distribution::Default, &device));
 }
 
 pub fn get_negative_samples<B: Backend>(
     sampled_negative_indices: Tensor<B, 3, Int>,
-    features: Tensor<B, 3, Float>,
+    features: Tensor<B, 4, Float>,
 ) -> Tensor<B, 4> {
-    let [batch, seq, hidden] = features.dims();
     let [_, _, num_negatives] = sampled_negative_indices.dims();
+    let [_, batch, seq,  hidden] = features.dims();
 
     let features = features.reshape([-1, hidden as i32]);
 

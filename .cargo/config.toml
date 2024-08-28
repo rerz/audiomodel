@@ -1,0 +1,5 @@
+[env]
+LIBTORCH="/opt/libtorch"
+#LD_LIBRARY_PATH="/opt/libtorch/lib"
+RSPOTIFY_CLIENT_SECRET="4ce7c1fc782c4cf59f4ca5380bc7ade4"
+RSPOTIFY_CLIENT_ID="a76bd9c8e09f45c58d92c4337fbd95b0"

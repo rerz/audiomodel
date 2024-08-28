@@ -5,8 +5,10 @@ use rand::Rng;
 
 use crate::mask::MaskingStrategy;
 
+#[derive(Clone)]
 pub struct BlockMask;
 
+#[derive(Clone)]
 pub struct BlockMaskConfig {
     pub mask_prob: f32,
     pub mask_len: usize,

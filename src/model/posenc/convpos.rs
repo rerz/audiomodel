@@ -21,6 +21,7 @@ fn same_pad<B: Backend>(tensor: Tensor<B, 3>, num_posconv_embeddings: usize) -> 
 #[derive(Module, Debug)]
 pub struct PosConv<B: Backend> {
     conv: Conv1d<B>,
+    num_embeddings: usize,
     activation: Gelu,
 }
 
@@ -39,6 +40,7 @@ impl PosConvConfig {
                 .with_padding(PaddingConfig1d::Explicit(self.num_embeddings / 2))
                 .with_groups(self.num_groups)
                 .init(device),
+            num_embeddings: self.num_embeddings,
             activation: Gelu::new(),
         }
     }
@@ -48,7 +50,7 @@ impl<B: Backend> PosConv<B> {
     pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         let hidden = hidden.swap_dims(1, 2);
         let hidden = self.conv.forward(hidden);
-        let hidden = same_pad(hidden, 10); // TODO: CHANGEME
+        let hidden = same_pad(hidden, self.num_embeddings); // TODO: CHANGEME
         let hidden = self.activation.forward(hidden);
         let hidden = hidden.swap_dims(1, 2);
 

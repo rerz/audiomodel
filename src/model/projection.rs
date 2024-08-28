@@ -31,10 +31,9 @@ impl FeatureProjectionConfig {
 }
 
 impl<B: Backend> FeatureProjection<B> {
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        let normed = self.norm.forward(hidden);
-        let hidden = self.linear.forward(normed.clone());
+    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        let hidden = self.linear.forward(hidden);
         let hidden = self.dropout.forward(hidden);
-        (hidden, normed)
+        hidden
     }
 }

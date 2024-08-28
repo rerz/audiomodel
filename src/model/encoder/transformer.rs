@@ -9,7 +9,7 @@ use itertools::Itertools;
 use num_traits::float::Float;
 
 use crate::model::encoder::{Encoder, EncoderConfig};
-use crate::model::posconv::{PosConv, PosConvConfig};
+use crate::model::posenc::convpos::{PosConv, PosConvConfig};
 
 #[derive(Config)]
 pub struct EncoderAttentionConfig {

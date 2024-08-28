@@ -1,8 +1,11 @@
 use std::iter;
+use burn::backend::libtorch::LibTorchDevice;
+use burn::backend::{LibTorch, NdArray};
+use burn::backend::ndarray::NdArrayDevice;
 
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::{Gelu, LayerNorm, LayerNormConfig};
+use burn::nn::{Gelu, Initializer, LayerNorm, LayerNormConfig};
 use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::prelude::{Backend, Tensor};
 use itertools::{Itertools, izip};
@@ -27,6 +30,7 @@ impl FeatureExtractorConvLayerConfig {
         FeatureExtractorConvLayer {
             conv: Conv1dConfig::new(self.conv_dim_in, self.conv_dim_out, self.conv_kernel)
                 .with_stride(self.conv_stride)
+                .with_initializer(Initializer::KaimingNormal { gain: 0.95, fan_out_only: false })
                 .init(device),
             norm: LayerNormConfig::new(self.conv_dim_out).init(device),
             activation: Gelu::new(),
@@ -134,4 +138,26 @@ pub fn feature_extractor_output_lens<B: Backend>(
     }
 
     sequence_lens
+}
+
+
+#[test]
+fn test_extractor_output() {
+    tch::maybe_init_cuda();
+
+    LibTorch::<f32, i8>::seed(0);
+
+    let device = LibTorchDevice::Cuda(0);
+    let input = Tensor::arange(1..1000, &device).unsqueeze_dim::<2>(0).float();
+
+    let extractor: FeatureExtractor<LibTorch> = FeatureExtractorConfig::new(
+        vec![1, 512, 512, 512, 512, 512, 512, 512],
+        vec![10, 3, 3, 3, 3, 2, 2],
+        vec![5, 2, 2, 2, 2, 2, 2],
+    ).init(&device);
+
+    let output = extractor.forward(input);
+
+    println!("{}", output);
+
 }

@@ -68,6 +68,7 @@ impl GumbelQuantizerConfig {
             )
                 .init(device),
             temperature: 2.0,
+            temperature_scaling: (2.0, 0.5, 0.9995)
         }
     }
 }
@@ -80,6 +81,14 @@ pub struct GumbelQuantizer<B: Backend> {
     code_vectors: Param<Tensor<B, 3>>,
     weight_projection: Linear<B>,
     temperature: f32,
+    // (2, 0.5, 0.999995) max, min, decay
+    temperature_scaling: (f32, f32, f32),
+}
+
+pub struct GumbelQuantizerOutput<B: Backend> {
+    prob_perplexity: Tensor<B, 1>,
+    code_perplexity: Option<Tensor<B, 1>>,
+    code_vectors: Tensor<B, 3>,
 }
 
 impl QuantizerConfig for GumbelQuantizerConfig {
@@ -103,7 +112,8 @@ impl<B: Backend> Quantizer<B> for GumbelQuantizer<B> {
         mask_time_steps: Tensor<B, 2, Bool>,
         device: &B::Device,
     ) -> (Tensor<B, 3>, Tensor<B, 1>) {
-        self.quantize(features, mask_time_steps, TRAINING, device)
+        let output = self.quantize(features, mask_time_steps, TRAINING, device);
+        (output.code_vectors, output.prob_perplexity)
     }
 
     fn num_groups(&self) -> usize {
@@ -113,48 +123,65 @@ impl<B: Backend> Quantizer<B> for GumbelQuantizer<B> {
     fn num_vectors_per_group(&self) -> usize {
         self.vectors_per_group
     }
+
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+
+    fn set_num_steps(&mut self, num_steps: u32) {
+        self.temperature = f32::max(self.temperature_scaling.0 * self.temperature_scaling.2.powf(num_steps as f32), self.temperature_scaling.1);
+    }
 }
 
 impl<B: Backend> GumbelQuantizer<B> {
     pub fn quantize(
         &self,
-        hidden: Tensor<B, 3>,
+        x: Tensor<B, 3>,
         mask_time_indices: Tensor<B, 2, Bool>,
         training: bool,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
-        let [batch, seq, feats] = hidden.dims();
+    ) -> GumbelQuantizerOutput<B> {
+        let [batch, time, feats] = x.dims();
 
-        let hidden = self.weight_projection.forward(hidden);
-        let hidden = hidden.reshape::<2, _>([(batch * seq * self.num_groups) as i32, -1]);
+        let x = self.weight_projection.forward(x);
+        let x = x.reshape::<2, _>([(batch * time * self.num_groups) as i32, -1]);
 
-        let (code_vector_probs, perplexity) = match training {
-            true => self.forward_train(hidden, mask_time_indices, [batch, seq], device),
-            false => self.forward_eval(hidden, mask_time_indices, [batch, seq], device),
+        let avg_probs = softmax(x.clone().reshape([(batch * time) as i32, self.num_groups as i32, -1]), 2).mean_dim(0);
+        let prob_perplexity = self.perplexity(avg_probs);
+
+        let temp = self.temperature;
+
+        let (code_vector_probs, code_perplexity) = match training {
+            true => self.forward_train(x, mask_time_indices, [batch, time], device),
+            false => self.forward_eval(x, mask_time_indices, [batch, time], device),
         };
 
         let code_vectors_per_group =
             code_vector_probs.unsqueeze_dim::<3>(2) * self.code_vectors.val();
 
         let code_vectors = code_vectors_per_group.reshape([
-            (batch * seq) as i32,
+            (batch * time) as i32,
             self.num_groups as i32,
             self.vectors_per_group as i32,
             -1,
         ]);
         let code_vectors = code_vectors
             .sum_dim(2)
-            .reshape([batch as i32, seq as i32, -1]);
+            .reshape([batch as i32, time as i32, -1]);
 
-        (code_vectors, perplexity)
+        GumbelQuantizerOutput {
+            code_perplexity,
+            prob_perplexity,
+            code_vectors,
+        }
     }
 
-    fn perplexity(&self, probs: Tensor<B, 3>, mask: Tensor<B, 2, Bool>) -> Tensor<B, 1> {
-        let extended_mask = mask.clone().flatten::<1>(0, 1).unsqueeze_dims::<3>(&[1, 2]).expand(probs.shape());
-        let probs = Tensor::mask_where(probs.clone(), extended_mask, Tensor::ones_like(&probs));
-        let marginal_probs = probs.sum_dim(0) / mask.int().sum().to_data().to_vec::<B::IntElem>().unwrap()[0].elem::<i32>() as f32;
+    fn perplexity(&self, probs: Tensor<B, 3>) -> Tensor<B, 1> {
+        //let extended_mask = mask.clone().flatten::<1>(0, 1).unsqueeze_dims::<3>(&[1, 2]).expand(probs.shape());
+        //let probs = Tensor::mask_where(probs.clone(), extended_mask, Tensor::ones_like(&probs));
+        //let marginal_probs = probs.sum_dim(0) / mask.int().sum().to_data().to_vec::<B::IntElem>().unwrap()[0].elem::<i32>() as f32;
 
-        let perplexity = Tensor::exp(-Tensor::sum_dim(marginal_probs.clone() * Tensor::log(marginal_probs + 1e-7), 2));
+        let perplexity = Tensor::exp(-Tensor::sum_dim(probs.clone() * Tensor::log(probs + 1e-7), 2));
         let perplexity = perplexity.sum();
 
         perplexity
@@ -164,45 +191,40 @@ impl<B: Backend> GumbelQuantizer<B> {
         &self,
         hidden: Tensor<B, 2>,
         mask_time_indices: Tensor<B, 2, Bool>,
-        [batch, seq]: [usize; 2],
+        [batch, time]: [usize; 2],
         device: &B::Device,
-    ) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    ) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
         let code_vector_probs = gumbel_softmax(hidden.clone(), self.temperature, true, device);
-        let code_vector_soft = softmax(
-            hidden.reshape([(batch * seq) as i32, self.num_groups as i32, -1]),
-            2,
-        );
-        let perplexity = self.perplexity(code_vector_soft, mask_time_indices);
+        let code_vector_probs = code_vector_probs.reshape([(batch * time) as i32, -1]);
 
-        let code_vector_probs = code_vector_probs.reshape([(batch * seq) as i32, -1]);
-
-        (code_vector_probs, perplexity)
+        (code_vector_probs, None)
     }
 
     fn forward_eval(
         &self,
         hidden: Tensor<B, 2>,
         mask_time_indices: Tensor<B, 2, Bool>,
-        [batch, seq]: [usize; 2],
+        [batch, time]: [usize; 2],
         device: &B::Device,
-    ) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    ) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
         let code_vector_idx = hidden.clone().argmax(1);
         let code_vector_idx = code_vector_idx.reshape([-1, 1]);
 
-        let code_vector_probs = Tensor::zeros_like(&hidden);
-        let code_vector_probs = Tensor::scatter(
-            code_vector_probs.clone(),
+        let hard_x = Tensor::zeros_like(&hidden);
+        let hard_x = Tensor::scatter(
+            hard_x.clone(),
             1,
             code_vector_idx,
-            Tensor::ones(code_vector_probs.shape(), device),
+            Tensor::ones(hard_x.shape(), device),
         );
-        let code_vector_probs =
-            code_vector_probs.reshape([(batch * seq) as i32, self.num_groups as i32, -1]);
+        let hard_x =
+            hard_x.reshape([(batch * time) as i32, self.num_groups as i32, -1]);
 
-        let perplexity = self.perplexity(code_vector_probs.clone(), mask_time_indices);
+        let hard_probs = hard_x.clone().mean_dim(0);
+        let code_perplexity = self.perplexity(hard_probs);
 
-        let code_vector_probs = code_vector_probs.reshape([(batch * seq) as i32, -1]);
+        let code_vector_probs = hard_x.reshape([(batch * time) as i32, -1]);
 
-        (code_vector_probs, perplexity)
+        (code_vector_probs, Some(code_perplexity))
     }
 }

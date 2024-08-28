@@ -3,6 +3,7 @@ use std::iter;
 
 use itertools::Itertools;
 use rmp3::{DecoderOwned, Frame};
+use samplerate::ConverterType;
 
 pub trait Format {
     fn read(bytes: &[u8]) -> (Vec<f32>, u32);
@@ -16,14 +17,29 @@ impl Format for Mp3 {
     }
 }
 
+pub fn resample(audio: Vec<f32>, from_sr: u32, to_sr: u32) -> Vec<f32> {
+    samplerate::convert(from_sr, to_sr, 1, ConverterType::SincFastest, &audio).unwrap()
+}
+
+fn average_interleaved(input: &[f32]) -> Vec<f32> {
+    input
+        .chunks(2)
+        .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
+        .collect()
+}
+
+
 fn read_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
     let mut decoder = DecoderOwned::new(bytes);
-
     let (samples, sample_rates): (Vec<_>, Vec<_>) = iter::from_fn(|| {
         let frame = decoder.next();
 
         match frame {
-            Some(Frame::Audio(audio)) => Some((audio.samples().to_vec(), audio.sample_rate())),
+            Some(Frame::Audio(audio)) => {
+                let channels = audio.channels();
+
+                Some((audio.samples().to_vec(), audio.sample_rate()))
+            },
             _ => None,
         }
     })
@@ -42,6 +58,8 @@ fn read_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
         .map(|x| x.to_vec())
         .flatten()
         .collect_vec();
+
+    let samples = average_interleaved(&samples);
 
     (samples, sample_rate)
 }
@@ -63,6 +81,42 @@ fn read_wav(bytes: &[u8]) -> (Vec<f32>, u32) {
     (samples.to_vec(), sr)
 }
 
-pub fn read_bytes<F: Format>(bytes: &[u8]) -> (Vec<f32>, u32) {
-    F::read(bytes)
+pub fn read_bytes_inferred(bytes: &[u8], resample_to: usize) -> (Vec<f32>, u32) {
+    let ty = infer::get(bytes).unwrap();
+
+    match ty.mime_type() {
+        "audio/x-wav" => read_wav(bytes),
+        "audio/mpeg" => read_mp3(bytes),
+        "audio/ogg" => read_ogg(bytes),
+        _ => panic!("could not infer file format")
+    }
+}
+
+pub fn read_bytes<F: Format>(bytes: &[u8], resample_to: u32) -> (Vec<f32>, u32) {
+    let (audio, sr) = F::read(bytes);
+
+    if resample_to != sr {
+        return (resample(audio, sr, resample_to), resample_to);
+    }
+
+    (audio, sr)
+}
+
+fn read_ogg(bytes: &[u8]) -> (Vec<f32>, u32) {
+    let mut reader = lewton::inside_ogg::OggStreamReader::new(Box::new(Cursor::new(bytes.to_vec()))).unwrap();
+    let sr = reader.ident_hdr.audio_sample_rate;
+
+    let mut samples = vec![];
+
+    while let Some(packet) = reader.read_dec_packet_generic::<Vec<Vec<f32>>>().unwrap() {
+        let mean = packet[0]
+        .iter()
+        .enumerate()
+        .map(|(i, _)| packet.iter().map(|c| c[i]).sum::<f32>() / packet.len() as f32)
+        .collect_vec();
+
+        samples.extend(mean);
+    }
+
+    (samples, sr)
 }

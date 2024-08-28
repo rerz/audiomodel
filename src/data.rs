@@ -1,11 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use burn::data::dataloader::batcher::Batcher;
-use burn::data::dataset::{InMemDataset, SqliteDataset};
+use burn::data::dataloader::Dataset;
+use burn::data::dataset::{HuggingfaceDatasetLoader, InMemDataset, SqliteDataset};
 use burn::prelude::{Backend, Bool, Int, Tensor};
 use itertools::Itertools;
+use rayon::iter::ParallelBridge;
+use samplerate::ConverterType;
+use serde::{Deserialize, Serialize};
 use soa_derive::StructOfArray;
 
+use crate::io::read_bytes_inferred;
 use crate::mask::block::{BlockMask, BlockMaskConfig};
 use crate::mask::MaskingStrategy;
 use crate::mine::sample_negative_indices;
@@ -14,11 +19,66 @@ use crate::model::extractor::feature_extractor_output_lens;
 use crate::pad::{pad_sequences, PaddingType};
 
 pub struct AudioDataset {
-    inner: SqliteDataset<AudioItem>,
+    pub inner: InMemDataset<AudioSample>,
 }
 
-pub struct AudioDatasetWithNegatives<B: Backend> {
-    inner: InMemDataset<AudioItemWithMaskAndNegatives<B>>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MusicGenresItem {
+    audio_bytes: Vec<u8>,
+    audio_path: Option<String>,
+    song_id: i64,
+    genre_id: i64,
+    genre: String,
+}
+
+impl From<MusicGenresItem> for AudioSample {
+    fn from(value: MusicGenresItem) -> Self {
+        let (audio, sr) = read_bytes_inferred(&value.audio_bytes, 16_000);
+        AudioSample {
+            audio,
+            sr,
+            id: value.song_id,
+            group_label: value.genre_id,
+        }
+    }
+}
+
+use rayon::iter::ParallelIterator;
+
+impl AudioDataset {
+    pub fn music_genres() -> (AudioDataset, AudioDataset) {
+        let dataset_train = HuggingfaceDatasetLoader::new("lewtun/music_genres")
+            .dataset::<MusicGenresItem>("train")
+            .unwrap()
+            .iter()
+            .par_bridge()
+            .map(|track| track.into())
+            .collect::<Vec<_>>();
+
+        let dataset_test = HuggingfaceDatasetLoader::new("lewtun/music_genres")
+            .dataset::<MusicGenresItem>("test")
+            .unwrap()
+            .iter()
+            .par_bridge()
+            .map(|track| track.into())
+            .collect::<Vec<_>>();
+
+        (Self { inner: InMemDataset::new(dataset_train) }, Self { inner: InMemDataset::new(dataset_test) })
+    }
+
+    pub fn music_genres_small() -> AudioDataset {
+        let dataset = HuggingfaceDatasetLoader::new("lewtun/music_genres_small")
+            .dataset::<MusicGenresItem>("train")
+            .unwrap()
+            .iter()
+            .par_bridge()
+            .map(|track| track.into())
+            .collect::<Vec<_>>();
+
+        Self {
+            inner: InMemDataset::new(dataset),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -32,26 +92,38 @@ pub struct AudioBatch<B: Backend> {
 }
 
 #[derive(Clone)]
-pub struct AudioBatcher<B: Backend> {
+pub struct AudioBatcher<B: Backend, M: MaskingStrategy<B>> {
+    padding_len: usize,
     config: AudioModelConfig,
     device: B::Device,
+    mask_config: M::Config,
 }
 
-impl<B: Backend> AudioBatcher<B> {
-    pub fn new(config: AudioModelConfig, device: B::Device) -> Self {
-        Self { config, device }
+impl<B: Backend, M: MaskingStrategy<B>> AudioBatcher<B, M> {
+    pub fn new(
+        pad_to_len: usize,
+        config: AudioModelConfig,
+        mask_config: M::Config,
+        device: B::Device,
+    ) -> Self {
+        Self {
+            config,
+            device,
+            padding_len: pad_to_len,
+            mask_config,
+        }
     }
 }
 
-impl<B: Backend> Batcher<AudioItem, AudioBatch<B>> for AudioBatcher<B> {
-    fn batch(&self, items: Vec<AudioItem>) -> AudioBatch<B> {
+impl<B: Backend, M: MaskingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for AudioBatcher<B, M> {
+    fn batch(&self, items: Vec<AudioSample>) -> AudioBatch<B> {
         let batch = items.len();
 
-        let soa = AudioItemVec::from_iter(items);
+        let audio = items.into_iter().map(|audio| audio.audio).collect_vec();
 
         let padded = pad_sequences(
-            soa.audio.clone(),
-            PaddingType::Explicit(10_000),
+            audio.clone(),
+            PaddingType::Explicit(self.padding_len),
             &self.device,
         );
         let max_seq_len = padded.sequences.dims()[1];
@@ -70,20 +142,16 @@ impl<B: Backend> Batcher<AudioItem, AudioBatch<B>> for AudioBatcher<B> {
             &self.config.feature_extractor_config.conv_strides,
         );
 
-        let masked_time_indices = BlockMask::get_mask_indices(
+        let masked_time_indices = M::get_mask_indices(
             [batch, extracted_features_seq_len],
             extracted_seq_lens.clone(),
-            BlockMaskConfig {
-                mask_prob: 0.2,
-                mask_len: 3,
-                min_masks: 0,
-            },
+            self.mask_config.clone(),
             &self.device,
         );
 
         let sampled_negative_indices = sample_negative_indices(
             [batch, extracted_features_seq_len],
-            11,
+            48,
             masked_time_indices.clone(),
             extracted_seq_lens,
             &self.device,
@@ -106,18 +174,10 @@ impl<B: Backend> AudioBatch<B> {
     }
 }
 
-#[derive(StructOfArray, Clone, Debug)]
-pub struct AudioItem {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioSample {
     pub audio: Vec<f32>,
-    pub seq_len: usize,
-    pub song_id: usize,
-    pub genre_id: usize,
-    pub genre: String,
+    pub id: i64,
+    pub group_label: i64,
     pub sr: u32,
 }
-
-pub struct AudioItemWithMaskAndNegatives<B: Backend> {
-    item: AudioItem,
-    mask: Tensor<B, 1, Int>,
-}
-

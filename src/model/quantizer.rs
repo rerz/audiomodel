@@ -27,4 +27,8 @@ pub trait Quantizer<B: Backend>: Module<B> {
     fn num_groups(&self) -> usize;
 
     fn num_vectors_per_group(&self) -> usize;
+
+    fn temperature(&self) -> f32;
+
+    fn set_num_steps(&mut self, num_steps: u32);
 }

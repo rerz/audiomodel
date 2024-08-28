@@ -6,7 +6,7 @@ use burn::nn::transformer::{
 use burn::prelude::{Backend, Bool, Tensor};
 
 use crate::model::encoder::{Encoder, EncoderConfig};
-use crate::model::posconv::{PosConv, PosConvConfig};
+use crate::model::posenc::convpos::{PosConv, PosConvConfig};
 
 #[derive(Config)]
 pub struct BurnTransformerEncoderConfig {
@@ -27,10 +27,19 @@ pub struct BurnTransformer<B: Backend> {
 
 impl<B: Backend> BurnTransformer<B> {
     pub fn encode(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {
-        let hidden = self.pos_conv.forward(hidden);
-        self.transformer_encoder.forward(
+        let hidden_conv = self.pos_conv.forward(hidden.clone());
+        let hidden = hidden_conv + hidden;
+
+        // TODO: pad to multiple?
+       // let hidden = hidden.swap_dims(0, 1);
+
+        let hidden = self.transformer_encoder.forward(
             TransformerEncoderInput::new(hidden).mask_attn(attention_mask.unsqueeze_dim(1)),
-        )
+        );
+
+        //hidden.swap_dims(0, 1)
+
+        hidden
     }
 }
 

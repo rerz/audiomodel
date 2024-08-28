@@ -10,7 +10,7 @@ use crate::mask::block::{BlockMask, BlockMaskConfig};
 use crate::model::extractor::feature_extractor_output_lens;
 
 pub trait MaskingStrategy<B: Backend> {
-    type Config;
+    type Config: Clone + Send + Sync;
 
     fn get_mask_indices(
         batch_and_seq_dims: [usize; 2],
@@ -54,7 +54,7 @@ fn test_get_mask_indices() {
     println!("{indices}")
 }
 
-pub fn feature_space_attention_mask<B: Backend>(
+pub fn feature_space_padding_mask<B: Backend>(
     feature_vec_len: usize,
     sequence_lens: Vec<usize>,
     kernel_sizes: &[usize],
@@ -85,10 +85,7 @@ fn test_feature_space_attention_mask() {
 
     let feature_size = feature_extractor_output_lens::<NdArray>(vec![100], &kernels, &strides);
 
-    let attention_mask = feature_space_attention_mask::<NdArray>(feature_size[0], vec![50], &kernels, &strides, &device);
-
-    dbg!(feature_size);
-    dbg!(attention_mask);
+    let attention_mask = feature_space_padding_mask::<NdArray>(feature_size[0], vec![50], &kernels, &strides, &device);
 }
 
 // hidden: batch x sequence x hidden
@@ -110,10 +107,6 @@ fn mask_hidden_time<B: Backend>(
     hidden
 }
 
-fn mask_hidden_features<B: Backend>() {
-    todo!()
-}
-
 pub fn mask_hidden_states<B: Backend>(
     hidden: Tensor<B, 3>,
     mask_indices: Tensor<B, 2, Bool>,
@@ -121,8 +114,6 @@ pub fn mask_hidden_states<B: Backend>(
     attention_mask: Tensor<B, 2, Bool>,
 ) -> Tensor<B, 3> {
     let hidden = mask_hidden_time(hidden, mask_indices, mask_value, attention_mask);
-
-    // TODO: the default w2v2 config does not use feature masking so not implemented yet
 
     hidden
 }
