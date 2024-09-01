@@ -68,7 +68,7 @@ impl GumbelQuantizerConfig {
             )
                 .init(device),
             temperature: 2.0,
-            temperature_scaling: (2.0, 0.5, 0999995)
+            temperature_scaling: (2.0, 0.5, 0.999995)
         }
     }
 }

@@ -8,8 +8,11 @@ use itertools::Itertools;
 use ndarray::AssignElem;
 
 use crate::mask;
+use crate::mask::block::BlockMask;
+use crate::mask::MaskingStrategy;
 use crate::model::encoder::{Encoder, EncoderConfig};
 use crate::model::extractor::{FeatureExtractor, FeatureExtractorConfig};
+use crate::model::pretrain::ScalarExt;
 use crate::model::projection::{FeatureProjection, FeatureProjectionConfig};
 
 pub mod encoder;
@@ -73,51 +76,51 @@ impl<B: Backend, E: Encoder<B>> AudioModel<B, E> {
         &self,
         input: AudioModelInput<B>,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 1>) {
+    ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 1>, u32) {
         // input.sequences : B x T
         let features = self.feature_extractor.forward(input.sequences);
         // features : B x C x T
+
+        let [_batch, _channel, _time] = features.dims();
 
         let features_penalty = features.clone().powf_scalar(2.0).mean();
 
         let features = features.swap_dims(1, 2);
         let features = self.feature_norm.forward(features);
-        // features : B x T x C
+
+        let [_batch, _time, _channel] = features.dims();
 
         let y = features.clone();
+
+
+        // TODO: use mask to index into y and only keep the features corresponding to masked steps
+        let y = y.clone().select(1, input.masked_time_steps.clone().nonzero()[1].clone());
+
+        let y_dims = y.dims();
 
         let feature_space_padding_mask =
             mask::feature_space_padding_mask(features.dims()[1], input.sequence_lens, self.feature_extractor.kernel_sizes(), self.feature_extractor.strides(), device);
 
+        let num_total_steps = feature_space_padding_mask.clone().int().sum().scalar();
 
-        let [batch, time, channels] = features.dims();
         let steps_to_drop = features.dims()[1] % 2;
 
         let masked_time_steps = input.masked_time_steps;
 
-        // features : B x T x C
-        // y : B x T x C
         let features = self.feature_projection.forward(features);
 
-
-        let x = mask::mask_hidden_states(
+        let x = BlockMask::apply_mask(
             features,
             masked_time_steps,
             self.mask.val(),
             feature_space_padding_mask.clone(),
+            device
         );
 
 
         let x = self.encoder.forward(x, feature_space_padding_mask);
 
-        // TODO:
-        //                # tpu-comment: reducing the size in a dynamic way causes
-        //                 # too many recompilations on xla.
-        //                 y = unmasked_features[mask_indices].view(
-        //                     unmasked_features.size(0), -1, unmasked_features.size(-1)
-        //                 )
 
-
-        (x, y, features_penalty)
+        (x, y, features_penalty, num_total_steps)
     }
 }

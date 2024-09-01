@@ -86,7 +86,7 @@ pub struct AudioBatch<B: Backend> {
     pub device: B::Device,
     pub sequences: Tensor<B, 2>,
     pub sequence_lens: Vec<usize>,
-    pub attention_mask: Tensor<B, 2, Bool>,
+    pub padding_mask: Tensor<B, 2, Bool>,
     pub masked_time_indices: Tensor<B, 2, Bool>,
     pub sampled_negative_indices: Tensor<B, 3, Int>,
 }
@@ -149,18 +149,24 @@ impl<B: Backend, M: MaskingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for 
             &self.device,
         );
 
+        let mask_dims = masked_time_indices.dims();
+
+        let num = masked_time_indices.clone().nonzero()[1].clone().dims()[0];
+
         let sampled_negative_indices = sample_negative_indices(
-            [batch, extracted_features_seq_len],
-            48,
+            [batch, num],
+            100,
             masked_time_indices.clone(),
             extracted_seq_lens,
             &self.device,
         );
 
+        //println!("batch seq dims {:?}", padded.sequences.dims());
+
         AudioBatch {
             device: self.device.clone(),
             sequences: padded.sequences,
-            attention_mask: padded.attention_mask,
+            padding_mask: padded.attention_mask,
             sequence_lens: padded.sequence_lens,
             masked_time_indices,
             sampled_negative_indices,

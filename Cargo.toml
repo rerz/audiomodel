@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-burn = { git = "https://github.com/rerz/burn", features = ["ndarray", "train", "autodiff", "tch", "fusion", "wgpu"] }
+burn = { git = "https://github.com/rerz/burn", features = ["ndarray", "train", "autodiff", "tch", "fusion", "wgpu", "cuda-jit", "candle"] }
 color-eyre = "0.6.3"
 itertools = "0.13.0"
 ndarray = "0.15.6"

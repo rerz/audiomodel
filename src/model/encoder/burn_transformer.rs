@@ -27,6 +27,8 @@ pub struct BurnTransformer<B: Backend> {
 
 impl<B: Backend> BurnTransformer<B> {
     pub fn encode(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3> {
+        let [_batch, _time, _hidden] = hidden.dims();
+
         let hidden_conv = self.pos_conv.forward(hidden.clone());
         let hidden = hidden_conv + hidden;
 

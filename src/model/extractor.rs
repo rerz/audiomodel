@@ -5,9 +5,10 @@ use burn::backend::ndarray::NdArrayDevice;
 
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::{Gelu, Initializer, LayerNorm, LayerNormConfig};
+use burn::nn::{Gelu, Initializer, LayerNorm, LayerNormConfig, PaddingConfig1d};
 use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::prelude::{Backend, Tensor};
+use burn::tensor::ops::conv::calculate_conv_output_size;
 use itertools::{Itertools, izip};
 
 #[derive(Module, Debug)]
@@ -46,6 +47,8 @@ impl<B: Backend> FeatureExtractorConvLayer<B> {
         let hidden = self.norm.forward(hidden);
         let hidden = hidden.swap_dims(1, 2);
 
+        //println!("extractor hidden dims {:?}", hidden.dims());
+
         let hidden = self.activation.forward(hidden);
         hidden
     }
@@ -62,10 +65,19 @@ impl FeatureExtractorConfig {
     pub fn init<B: Backend>(self, device: &B::Device) -> FeatureExtractor<B> {
         let dim_windows = self.conv_dims.iter().tuple_windows::<(_, _)>();
 
+        let mut conv_layers = vec![];
+        for i in 0..self.conv_dims.len() - 1 {
+            let in_dim = self.conv_dims[i];
+            let out_dim = self.conv_dims[i + 1];
+            let kernel = self.conv_kernels[i];
+            let stride = self.conv_strides[i];
+
+            let layer = FeatureExtractorConvLayerConfig::new(in_dim, out_dim, kernel, stride).init(device);
+            conv_layers.push(layer);
+        }
+
         FeatureExtractor {
-            conv_layers: izip!(dim_windows, &self.conv_kernels, &self.conv_strides)
-                .map(|((in_dim, out_dim), kernel, stride)| FeatureExtractorConvLayerConfig::new(*in_dim, *out_dim, *kernel, *stride).init(device))
-                .collect_vec(),
+            conv_layers,
             kernel_sizes: self.conv_kernels,
             strides: self.conv_strides,
         }
@@ -94,12 +106,22 @@ pub fn has_nan<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> bool {
 
 impl<B: Backend> FeatureExtractor<B> {
     pub fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 3> {
+        let [_batch, _time] = input.dims();
+
         let mut hidden = input.unsqueeze_dim(1);
 
+        let [_batch, _channel, _time] = hidden.dims();
+
+
+        // WHY IS THIS NOT THE SAME AS TIME STEPS IN MASK?
         for layer in &self.conv_layers {
+            let hidden_dims = hidden.dims();
+            //println!("hidden dims {:?}", hidden_dims);
             hidden = layer.forward(hidden);
         }
 
+        let hidden_dims = hidden.dims();
+        //println!("hidden dims: {:?}", hidden_dims);
         hidden
     }
 
@@ -113,6 +135,20 @@ impl<B: Backend> FeatureExtractor<B> {
 
     pub fn output_len(&self, input_len: usize) -> usize {
         feature_extractor_output_lens::<B>(vec![input_len], &self.kernel_sizes, &self.strides)[0]
+    }
+
+        pub fn receptive_field(&self, sample_rate: u32) -> f32 {
+        let mut receptive_field = 1.0;
+        let mut total_stride = 1.0;
+
+        for (&kernel, &stride) in iter::zip(&self.kernel_sizes, &self.strides) {
+            receptive_field += (kernel as f32 - 1.0) * total_stride;
+            total_stride *= stride as f32;
+        }
+
+        let receptive_field_ms = (receptive_field / sample_rate as f32) * 1000.0;
+
+        receptive_field_ms
     }
 }
 
@@ -134,8 +170,11 @@ pub fn feature_extractor_output_lens<B: Backend>(
     strides: &[usize],
 ) -> Vec<usize> {
     for (kernel, stride) in iter::zip(kernel_sizes, strides) {
-        sequence_lens = conv1d_output_len::<B>(sequence_lens, *kernel, *stride, 0);
+        //println!("seq len {}", sequence_lens[0]);
+        sequence_lens = sequence_lens.into_iter().map(|len| calculate_conv_output_size(*kernel, *stride, 0, 1, len)).collect(); //  conv1d_output_len::<B>(sequence_lens, *kernel, *stride, 0);
     }
+
+    //println!("seq len {}", sequence_lens[0]);
 
     sequence_lens
 }
@@ -158,6 +197,6 @@ fn test_extractor_output() {
 
     let output = extractor.forward(input);
 
-    println!("{}", output);
+    //println!("{}", output);
 
 }

@@ -2,6 +2,7 @@ pub mod perplexity;
 pub mod gradnorm;
 pub mod temperature;
 pub mod correct;
+pub mod maskingratio;
 
 use std::marker::PhantomData;
 use burn::prelude::{Backend, Tensor};

@@ -1,7 +1,7 @@
 use std::iter;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use burn::backend::autodiff::ops::Backward;
 use burn::config::Config;
@@ -13,7 +13,7 @@ use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::prelude::{Backend, ElementConversion, Int};
-use burn::tensor::{Bool, Tensor, TensorData};
+use burn::tensor::{Bool, Element, Tensor, TensorData};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::loss::cross_entropy_with_logits;
 use burn::tensor::ops::IntElem;
@@ -28,7 +28,8 @@ use rand::Rng;
 
 use crate::data::{AudioBatch, AudioBatcher};
 use crate::metric::correct::{CorrectInput, CorrectMetric};
-use crate::metric::gradnorm::{GradientNormIntput, GradientNormMetric};
+use crate::metric::gradnorm::{GradientNorm, GradientNormIntput, GradientNormMetric};
+use crate::metric::maskingratio::MaskingRatioInput;
 use crate::metric::perplexity::{PerplexityInput, PerplexityMetric};
 use crate::metric::temperature::TemperatureInput;
 use crate::mine::get_negative_samples;
@@ -40,7 +41,7 @@ use crate::model::extractor::FeatureExtractorConfig;
 use crate::model::projection::FeatureProjectionConfig;
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
 use crate::model::quantizer::gumbel::GumbelQuantizerConfig;
-use crate::ops::cosine_similarity;
+use crate::ops::{cosine_similarity, GradientMult};
 use crate::util::download_hf_dataset;
 
 #[derive(Config)]
@@ -112,36 +113,35 @@ pub struct PretrainOutput<B: Backend> {
 pub trait ScalarExt<B: Backend> {
     type Elem;
 
-    fn scalar(&self) -> Self::Elem;
+    fn scalar<E: Element>(&self) -> E;
 }
 
 impl<B: Backend> ScalarExt<B> for Tensor<B, 1> {
     type Elem = B::FloatElem;
 
-    fn scalar(&self) -> B::FloatElem {
+    fn scalar<E: Element>(&self) -> E {
         let data = self.to_data();
 
         assert_eq!(data.num_elements(), 1);
-
-        data.to_vec().unwrap()[0]
+        data.to_vec::<Self::Elem>().unwrap().remove(0).elem()
     }
 }
 
 impl<B: Backend> ScalarExt<B> for Tensor<B, 1, Int> {
     type Elem = B::IntElem;
 
-    fn scalar(&self) -> Self::Elem {
+    fn scalar<E: Element>(&self) -> E {
         let data = self.to_data();
 
         assert_eq!(data.num_elements(), 1);
 
-        data.to_vec().unwrap()[0]
+        data.to_vec::<Self::Elem>().unwrap().remove(0).elem()
     }
 }
 
 impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
 
-    fn quantize(&self, y: Tensor<B, 3,>, masked_time_steps: Tensor<B, 2, Bool>, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 1>) {
+    fn quantize(&self, y: Tensor<B, 3,>, masked_time_steps: Tensor<B, 2, Bool>, device: &B::Device) -> (Tensor<B, 3>, Tensor<B, 1>) {
         let extracted_features = self.feature_dropout.forward(y);
         let (quantized_features, prob_perplexity) = self
             .quantizer
@@ -149,14 +149,13 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
 
 
         let quantized_features = self.project_quantized.forward(quantized_features);
-        let quantized_features = quantized_features.unsqueeze_dim::<4>(0);
 
         (quantized_features, prob_perplexity)
     }
 
-    fn predict(&self, inputs: Tensor<B, 2>, seq_lens: Vec<usize>, masked_time_steps: Tensor<B, 2, Bool>, device: &B::Device,) -> (Tensor<B, 4>, Tensor<B, 3>, Tensor<B, 1>) {
+    fn predict(&self, inputs: Tensor<B, 2>, seq_lens: Vec<usize>, masked_time_steps: Tensor<B, 2, Bool>, device: &B::Device,) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 1>, u32) {
         // y are the unmasked extracted features
-        let (x, y, features_penalty) = self.model.forward(
+        let (x, y, features_penalty, num_total_samples) = self.model.forward(
             AudioModelInput {
                 sequences: inputs,
                 sequence_lens: seq_lens.clone(),
@@ -165,10 +164,12 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
             device,
         );
 
-        let predicted_features = self.project_hidden.forward(x);
-        let predicted_features = predicted_features.unsqueeze_dim(0);
+        // only select time steps that have been masked (b x t x c)
+        let x = x.select(1, masked_time_steps.clone().nonzero()[1].clone());
 
-        (predicted_features, y, features_penalty)
+        let x = self.project_hidden.forward(x);
+
+        (x, y, features_penalty, num_total_samples)
     }
 
     pub fn forward(
@@ -179,21 +180,21 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
         masked_time_steps: Tensor<B, 2, Bool>,
         negative_indices: Tensor<B, 3, Int>,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>, u32) {
-        let [batch, seq] = inputs.dims();
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>, u32, u32) {
+        //println!("input dims {:?}", inputs.dims());
 
-        let num_samples = attention_mask
-            .clone()
-            .int()
-            .sum()
-            .scalar();
+        let receptive_field = self.model.feature_extractor.receptive_field(16_000);
 
-        let (x, y, features_penalty) = self.predict(
+        let [_batch, _time] = inputs.dims();
+
+        let (x, y, features_penalty, num_total_steps) = self.predict(
             inputs,
             seq_lens,
             masked_time_steps.clone(),
             device
         );
+
+        // x and y only contain data for the masked time steps
 
         let (y, prob_perplexity) = self.quantize(
             y,
@@ -201,6 +202,7 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
             device
         );
 
+        let y_dims = y.dims();
 
         let negative_features = get_negative_samples(
             negative_indices,
@@ -208,20 +210,20 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
         );
 
 
-        // quantized features: 1 x batch x ?? x mask_len
-        // negative_features: num_negatives x batch x ?? x mask_len
-        // projected_features: 1 x batch x ?? x mask_len
+        // quantized features: 1 x batch x time x hidden
+        // negative_features: num_negatives x batch x time x hidden
+        // projected_features: 1 x batch x time x hidden
 
+        // logits shape: (num_negatives + 1) x batch x seq
         let logits = self.contrastive_logits(
-            x.clone(),
-            y,
+            x.clone().unsqueeze_dim(0),
+            y.unsqueeze_dim(0),
             negative_features,
             0.1,
         );
 
-        // constrastive_logits: (num_negatives + 1) x batch x seq
-
-        // TODO: neg is pos thing
+        let logit_dims = logits.dims();
+        // logits: (num_negatives + 1) x batch x seq
 
         let logits = logits
             .clone()
@@ -240,7 +242,7 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
             let both = iter::zip(max_iter, min_iter).map(|(a, b)| a & b);
             let both = Tensor::<B, 2, Bool>::from_bool(TensorData::new(both.collect_vec(), max.shape()), device);
 
-            let correct = max.clone().int().sum().scalar().elem::<u32>() - both.int().sum().scalar().elem::<u32>();
+            let correct = max.clone().int().sum().scalar::<u32>() - both.int().sum().scalar::<u32>();
             let count = max.to_data().num_elements();
 
             (correct, count)
@@ -249,16 +251,20 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
         let masked_indices = masked_time_steps.clone().nonzero()[1].clone();//.clone().to_data().to_vec::<i64>().unwrap();
 
         // ignoring indices in cross entropy loss seems broken so we just remove them from the tensor
-        let unmasked_logits = Tensor::select(logits, 0, masked_indices);
-        //let unmasked_logits = logits;
+        //let unmasked_logits = Tensor::select(logits, 0, masked_indices);
+        let unmasked_logits = logits;
 
         let target = Tensor::zeros([unmasked_logits.dims()[0]], device);
 
         let num_code_vectors = self.quantizer.num_groups() * self.quantizer.num_vectors_per_group();
+
+        let logit_dims = unmasked_logits.dims();
+        let target_dims = target.dims();
+
         //let contrastive_loss = cross_entropy_with_logits(unmasked_logits, target.unsqueeze_dim(1));
         let contrastive_loss = self.loss.forward(unmasked_logits, target);//.sum();
 
-        let diversity_loss = (num_code_vectors as f32 - prob_perplexity.clone().scalar().elem::<f32>()) / num_code_vectors as f32;
+        let diversity_loss = (num_code_vectors as f32 - prob_perplexity.clone().scalar::<f32>()) / num_code_vectors as f32;
 
         let diversity_loss_weight = 0.1;
         let features_penalty_weight = 10.0;
@@ -275,7 +281,7 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
 
 
 
-        (x.squeeze(0), loss, prob_perplexity, correct)
+        (x, loss, prob_perplexity, correct, num_total_steps)
     }
 
     fn contrastive_logits(
@@ -286,6 +292,9 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
         logit_temperature: f32,
     ) -> Tensor<B, 3> {
         let target_and_negatives = Tensor::cat(vec![target_features.clone(), negative_features.clone()], 0);
+
+        let pred_dims = predicted_features.dims();
+        let target_dims = target_and_negatives.dims();
 
         let neg_is_pos = (target_features.clone().equal(negative_features.clone()).all_dim(3));
 
@@ -302,15 +311,6 @@ impl<B: Backend, Q: Quantizer<B>, E: Encoder<B>> Pretrain<B, E, Q> {
     }
 }
 
-pub struct PretrainStepOutput<B: Backend> {
-    pub hidden: Tensor<B, 3>,
-    pub loss: Tensor<B, 1>,
-    pub perplexity: Tensor<B, 1>,
-    pub gradient_norm: f32,
-    pub quantizer_temperature: f32,
-    pub correct: u32,
-}
-
 impl<B: Backend> Adaptor<LossInput<B>> for PretrainStepOutput<B> {
     fn adapt(&self) -> LossInput<B> {
         LossInput::new(self.loss.clone())
@@ -325,7 +325,6 @@ impl<B: Backend> Adaptor<TemperatureInput> for PretrainStepOutput<B> {
     }
 }
 
-
 impl<B: Backend> Adaptor<PerplexityInput> for PretrainStepOutput<B> {
     fn adapt(&self) -> PerplexityInput {
         PerplexityInput {
@@ -333,6 +332,7 @@ impl<B: Backend> Adaptor<PerplexityInput> for PretrainStepOutput<B> {
         }
     }
 }
+
 
 impl<B: Backend> Adaptor<GradientNormIntput> for PretrainStepOutput<B> {
     fn adapt(&self) -> GradientNormIntput {
@@ -347,5 +347,88 @@ impl<B: Backend> Adaptor<CorrectInput> for PretrainStepOutput<B> {
         CorrectInput {
             value: self.correct,
         }
+    }
+}
+
+impl<B: Backend> Adaptor<MaskingRatioInput> for PretrainStepOutput<B> {
+    fn adapt(&self) -> MaskingRatioInput {
+        MaskingRatioInput {
+            num_total_samples: self.num_total_samples,
+            num_masked_samples: self.num_masked_samples,
+        }
+    }
+}
+
+pub struct PretrainStepOutput<B: Backend> {
+    pub hidden: Tensor<B, 3>,
+    pub loss: Tensor<B, 1>,
+    pub perplexity: Tensor<B, 1>,
+    pub gradient_norm: f32,
+    pub quantizer_temperature: f32,
+    pub correct: u32,
+    pub num_total_samples: u32,
+    pub num_masked_samples: u32,
+}
+
+impl<
+        B: AutodiffBackend,
+        E: Encoder<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay,
+        Q: Quantizer<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay,
+    > TrainStep<AudioBatch<B>, PretrainStepOutput<B>> for Pretrain<B, E, Q>
+{
+    fn step(&self, item: AudioBatch<B>) -> TrainOutput<PretrainStepOutput<B>> {
+        let num_masked_samples = item.masked_time_indices.clone().int().sum().scalar();
+
+        let (hidden, loss, perplexity, correct, num_total_steps) = self.forward(
+            item.sequences,
+            item.padding_mask,
+            item.sequence_lens,
+            item.masked_time_indices,
+            item.sampled_negative_indices,
+            &item.device,
+        );
+
+        let mut grads = loss.backward();
+
+        // TODO: gradient multiplier on feature extractor?
+        let mut gradient_mult = GradientMult {
+            multiplier: 0.1,
+            grads: &mut grads,
+        };
+        self.model.feature_extractor.visit(&mut gradient_mult);
+
+        let gradient_norm = {
+            let mut gradient_norm = GradientNorm::new(&grads, 1.0);
+            self.visit(&mut gradient_norm);
+            gradient_norm.total_norm.sqrt()
+        };
+
+        self.steps.fetch_add(1, Ordering::Relaxed);
+
+        TrainOutput::new(
+            self,
+            grads,
+            PretrainStepOutput {
+                loss,
+                hidden,
+                perplexity,
+                gradient_norm,
+                quantizer_temperature: self.quantizer.temperature(),
+                correct,
+                num_masked_samples,
+                num_total_samples: num_total_steps,
+            },
+        )
+    }
+
+    fn optimize<BB, O>(mut self, optim: &mut O, lr: f64, grads: GradientsParams) -> Self
+    where
+        BB: AutodiffBackend,
+        O: Optimizer<Self, BB>,
+        Self: AutodiffModule<BB>,
+    {
+        self.quantizer.set_num_steps(self.steps.load(Ordering::Relaxed) as u32);
+
+        optim.step(lr, self, grads)
     }
 }

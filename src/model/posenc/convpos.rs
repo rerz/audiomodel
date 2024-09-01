@@ -51,6 +51,9 @@ impl<B: Backend> PosConv<B> {
         let hidden = hidden.swap_dims(1, 2);
         let hidden = self.conv.forward(hidden);
         let hidden = same_pad(hidden, self.num_embeddings); // TODO: CHANGEME
+
+        //println!("conv pos hidden dims {:?}", hidden.dims());
+
         let hidden = self.activation.forward(hidden);
         let hidden = hidden.swap_dims(1, 2);
 

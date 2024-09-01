@@ -20,7 +20,6 @@ pub trait MaskingStrategy<B: Backend> {
     ) -> Tensor<B, 2, Bool>;
 
     fn apply_mask(
-        &self,
         hidden: Tensor<B, 3>,
         mask_time_indices: Tensor<B, 2, Bool>,
         mask: Tensor<B, 1>,
@@ -29,9 +28,13 @@ pub trait MaskingStrategy<B: Backend> {
     ) -> Tensor<B, 3> {
         let hidden_shape = hidden.shape();
 
+        let hidden_dims = hidden.dims();
+        let mask_dims = mask_time_indices.dims();
+
         let mask_indices = mask_time_indices
             .unsqueeze_dim::<3>(2)
             .expand(hidden_shape.clone());
+
         let mask = mask.expand(hidden_shape);
 
         let hidden = Tensor::mask_where(hidden, mask_indices, mask);
@@ -51,7 +54,7 @@ fn test_get_mask_indices() {
             mask_prob: 0.1,
         }, &NdArrayDevice::Cpu);
 
-    println!("{indices}")
+    //println!("{indices}")
 }
 
 pub fn feature_space_padding_mask<B: Backend>(
@@ -77,7 +80,7 @@ pub fn feature_space_padding_mask<B: Backend>(
 }
 
 #[test]
-fn test_feature_space_attention_mask() {
+fn test_feature_space_padding_mask() {
     let device = NdArrayDevice::Cpu;
 
     let kernels = [10, 5, 3];

@@ -1,88 +1,25 @@
-use std::sync::atomic::Ordering;
-use burn::data::dataloader::{DataLoaderBuilder, Dataset};
+use burn::data::dataloader::DataLoaderBuilder;
 use burn::data::dataset::SqliteDataset;
 use burn::grad_clipping::GradientClippingConfig;
-use burn::module::{AutodiffModule, ModuleDisplay};
 use burn::module::Module;
-use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
-use burn::prelude::ElementConversion;
+use burn::optim::AdamWConfig;
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::{LearnerBuilder, TrainOutput, TrainStep};
+use burn::train::LearnerBuilder;
 use burn::train::metric::{LearningRateMetric, LossMetric};
 
-use crate::data::{AudioBatch, AudioBatcher, AudioSample};
+use crate::data::{AudioBatcher, AudioSample};
 use crate::mask::block::{BlockMask, BlockMaskConfig};
 use crate::metric::correct::CorrectMetric;
-use crate::metric::gradnorm::{GradientNorm, GradientNormMetric};
+use crate::metric::gradnorm::GradientNormMetric;
+use crate::metric::maskingratio::MaskingRatio;
 use crate::metric::perplexity::PerplexityMetric;
 use crate::metric::temperature::TemperatureMetric;
 use crate::model::encoder::burn_transformer::BurnTransformer;
 use crate::model::encoder::Encoder;
-use crate::model::pretrain::{Pretrain, PretrainStepOutput};
+use crate::model::pretrain::Pretrain;
 use crate::model::quantizer::gumbel::GumbelQuantizer;
 use crate::model::quantizer::Quantizer;
-use crate::ops::{GradientMult, PolynomialDecay};
-
-impl<
-        B: AutodiffBackend,
-        E: Encoder<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay,
-        Q: Quantizer<B> + AutodiffModule<B, InnerModule: ModuleDisplay> + ModuleDisplay,
-    > TrainStep<AudioBatch<B>, PretrainStepOutput<B>> for Pretrain<B, E, Q>
-{
-    fn step(&self, item: AudioBatch<B>) -> TrainOutput<PretrainStepOutput<B>> {
-
-
-        let (hidden, loss, perplexity, correct) = self.forward(
-            item.sequences,
-            item.attention_mask,
-            item.sequence_lens,
-            item.masked_time_indices,
-            item.sampled_negative_indices,
-            &item.device,
-        );
-
-        let mut grads = loss.backward();
-
-        // TODO: gradient multiplier on feature extractor?
-        let mut gradient_mult = GradientMult {
-            multiplier: 0.1,
-            grads: &mut grads,
-        };
-        self.model.feature_extractor.visit(&mut gradient_mult);
-
-        let gradient_norm = {
-            let mut gradient_norm = GradientNorm::new(&grads, 1.0);
-            self.visit(&mut gradient_norm);
-            gradient_norm.total_norm.sqrt()
-        };
-
-        self.steps.fetch_add(1, Ordering::Relaxed);
-
-        TrainOutput::new(
-            self,
-            grads,
-            PretrainStepOutput {
-                loss,
-                hidden,
-                perplexity,
-                gradient_norm,
-                quantizer_temperature: self.quantizer.temperature(),
-                correct
-            },
-        )
-    }
-
-    fn optimize<BB, O>(mut self, optim: &mut O, lr: f64, grads: GradientsParams) -> Self
-    where
-        BB: AutodiffBackend,
-        O: Optimizer<Self, BB>,
-        Self: AutodiffModule<BB>,
-    {
-        self.quantizer.set_num_steps(self.steps.load(Ordering::Relaxed) as u32);
-
-        optim.step(lr, self, grads)
-    }
-}
+use crate::ops::PolynomialDecay;
 
 pub fn pretrain<B: AutodiffBackend>(
     device: B::Device,
@@ -101,7 +38,7 @@ pub fn pretrain<B: AutodiffBackend>(
             .init(input_len, encoder_config, quantizer_config, &device);
 
     let mask_config = BlockMaskConfig {
-        mask_prob: 0.5,
+        mask_prob: 0.65,
         mask_len: 10,
         min_masks: 1,
     };
@@ -113,7 +50,7 @@ pub fn pretrain<B: AutodiffBackend>(
         device.clone(),
     );
     let data_loader_train = DataLoaderBuilder::new(batcher)
-        .batch_size(32)
+        .batch_size(8)
         .num_workers(1)
         .shuffle(0)
         .build(dataset_train);
@@ -130,13 +67,13 @@ pub fn pretrain<B: AutodiffBackend>(
         .shuffle(0)
         .build(dataset_test);
 
-    TrainStep::step(&model, data_loader_train.iter().next().unwrap());
+    //TrainStep::step(&model, data_loader_train.iter().next().unwrap());
 
     let optimizer = AdamWConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
         .init();
 
-    let scheduler = PolynomialDecay::new(0.005, 0.0, 1.0, 1_200_000, 300_000);
+    let scheduler = PolynomialDecay::new(0.005, 0.0, 1.0, 600_000, 200_000);
 
     let learner = LearnerBuilder::new(".out")
         .devices(vec![device])
@@ -146,6 +83,7 @@ pub fn pretrain<B: AutodiffBackend>(
         .metric_train_numeric(LearningRateMetric::default())
         .metric_train_numeric(TemperatureMetric::<B>::default())
         .metric_train_numeric(CorrectMetric::<B>::default())
+        .metric_train_numeric(MaskingRatio::<B>::default())
         .num_epochs(50)
         .summary()
         .build(model, optimizer, scheduler);

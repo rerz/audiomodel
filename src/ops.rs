@@ -13,6 +13,9 @@ pub fn l2<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, 1> {
 }
 
 pub fn cosine_similarity<B: Backend, const D: usize>(a: Tensor<B, D>, b: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
+    let a_dims = a.dims();
+    let b_dims = b.dims();
+
     let dot = Tensor::sum_dim(a.clone() * b.clone(), dim);
     let norm_a = l2(a).to_data().to_vec::<B::FloatElem>().unwrap()[0].elem::<f32>();
     let norm_b = l2(b).to_data().to_vec::<B::FloatElem>().unwrap()[0].elem::<f32>();

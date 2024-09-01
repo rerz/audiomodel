@@ -27,6 +27,9 @@ impl<B: Backend> EncoderLayer<B> {
         let hidden = self.dropout.forward(hidden);
         let hidden = self.linear.forward(hidden);
         let hidden = self.norm.forward(hidden);
+
+        //println!("linear hidden dims {:?}", hidden.dims());
+
         let hidden = self.activation.forward(hidden);
         hidden
     }
