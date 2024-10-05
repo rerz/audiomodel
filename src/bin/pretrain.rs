@@ -1,22 +1,38 @@
-
-
 //impl Batcher<>
 
-use burn::backend::{Autodiff, Candle, CudaJit, LibTorch, NdArray, Wgpu};
-use burn::backend::candle::CandleDevice;
-use burn::backend::cuda_jit::CudaDevice;
+use burn::backend::{Autodiff, LibTorch, Wgpu};
 use burn::backend::libtorch::LibTorchDevice;
-use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
-use burn::data::dataloader::Dataset;
-use burn::data::dataset::{SqliteDataset, SqliteDatasetWriter};
+use burn::data::dataset::SqliteDataset;
+
+use audiomodel::config::small_music::small_music_config;
 use audiomodel::data::{AudioDataset, AudioSample};
-use audiomodel::io::resample;
+use audiomodel::mask::block::BlockMaskConfig;
+use audiomodel::train::{ConfigBundle, TrainConfig};
+
+type B = Wgpu;
 
 fn main() {
-    let dataset_train = SqliteDataset::<AudioSample>::from_db_file("music_genres.sqlite", "train").unwrap();
-    let dataset_test = SqliteDataset::<AudioSample>::from_db_file("music_genres.sqlite", "test").unwrap();
+    let dataset_train = AudioDataset::music_genres_small();
+    let dataset_test = AudioDataset::music_genres_small();
     // samples ~500_000 len
 
-    audiomodel::train::pretrain::<Autodiff<LibTorch>>(LibTorchDevice::Cuda(0), 100_000, dataset_train, dataset_test);
+    let mask_config = BlockMaskConfig {
+        mask_prob: 0.65,
+        mask_len: 10,
+        min_masks: 3,
+    };
+
+    let model_config = small_music_config::<B>();
+
+    audiomodel::train::pretrain::<Autodiff<B>, _, _>(
+        WgpuDevice::DiscreteGpu(0),
+        TrainConfig {
+            mask_config,
+            input_len: 50_000,
+        },
+        model_config,
+        dataset_train.inner,
+        dataset_test.inner,
+    );
 }

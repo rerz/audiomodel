@@ -5,8 +5,8 @@ use burn::prelude::{Backend, ElementConversion};
 use burn::tensor::{Bool, Distribution, Tensor};
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::AutodiffBackend;
-use crate::model::extractor::has_nan;
 
+use crate::model::extractor::has_nan;
 use crate::model::quantizer::{Quantizer, QuantizerConfig};
 
 fn sample_gumbel<B: Backend>(shape: [usize; 2], device: &B::Device) -> Tensor<B, 2> {
@@ -68,7 +68,7 @@ impl GumbelQuantizerConfig {
             )
                 .init(device),
             temperature: 2.0,
-            temperature_scaling: (2.0, 0.5, 0.999995)
+            temperature_scaling: (2.0, 0.5, 0.999995),
         }
     }
 }
@@ -106,14 +106,15 @@ impl<B: Backend> Quantizer<B> for GumbelQuantizer<B> {
         config.init(last_conv_dim, device)
     }
 
-    fn forward<const TRAINING: bool>(
+    fn forward(
         &self,
         features: Tensor<B, 3>,
         mask_time_steps: Tensor<B, 2, Bool>,
+        training: bool,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
-        let output = self.quantize(features, mask_time_steps, TRAINING, device);
-        (output.code_vectors, output.prob_perplexity)
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Option<Tensor<B, 1>>) {
+        let output = self.quantize(features, mask_time_steps, training, device);
+        (output.code_vectors, output.prob_perplexity, output.code_perplexity)
     }
 
     fn num_groups(&self) -> usize {
@@ -211,11 +212,13 @@ impl<B: Backend> GumbelQuantizer<B> {
         let code_vector_idx = code_vector_idx.reshape([-1, 1]);
 
         let hard_x = Tensor::zeros_like(&hidden);
+        let hard_x_dims = hard_x.dims();
+        let code_vector_idx_dims = code_vector_idx.dims();
         let hard_x = Tensor::scatter(
             hard_x.clone(),
             1,
-            code_vector_idx,
-            Tensor::ones(hard_x.shape(), device),
+            code_vector_idx.clone(),
+            code_vector_idx.float().ones_like(),
         );
         let hard_x =
             hard_x.reshape([(batch * time) as i32, self.num_groups as i32, -1]);

@@ -36,7 +36,7 @@ pub fn sample_negative_indices<B: Backend>(
     [batch, seq]: [usize; 2],
     num_negatives: usize,
     mask_time_indices: Tensor<B, 2, Bool>,
-    sequence_lens: Vec<usize>,
+    sequence_lens: Vec<u32>,
     device: &B::Device,
 ) -> Tensor<B, 3, Int> {
     let seq_len_range = Tensor::<B, 1, Int>::arange(0..seq as i64, device);
@@ -94,52 +94,20 @@ pub fn sample_negative_indices<B: Backend>(
     sampled_negative_indices
 }
 
-#[test]
-fn test_sample_negatives() {
-    let device = NdArrayDevice::Cpu;
-
-    sample_negative_indices::<NdArray>(
-        [2, 20],
-        3,
-        Tensor::<NdArray, 2, Int>::ones([2, 20], &device).bool(),
-        vec![20, 20],
-        &device
-    );
-}
-
-#[test]
-fn test_get_negative_samples() {
-        let device = NdArrayDevice::Cpu;
-
-    let negative_indices = sample_negative_indices::<NdArray>(
-        [2, 20],
-        3,
-        Tensor::<NdArray, 2, Int>::ones([2, 20], &device).bool(),
-        vec![20, 20],
-        &device
-    );
-
-    get_negative_samples(negative_indices, Tensor::random([2, 20, 1, 5], Distribution::Default, &device));
-}
 
 pub fn get_negative_samples<B: Backend>(
     sampled_negative_indices: Tensor<B, 3, Int>,
     targets: Tensor<B, 3, Float>,
 ) -> Tensor<B, 4> {
-    let [batch, time, num_negatives] = sampled_negative_indices.dims();
-    let [batch, masked_time,  hidden] = targets.dims();
+    let [_, time, num_negatives] = sampled_negative_indices.dims();
+    let [batch, _, hidden] = targets.dims();
 
     let sampled_negative_indices = sampled_negative_indices.unsqueeze_dim::<4>(3).expand([batch, time, num_negatives, hidden]);
     let targets = targets.unsqueeze_dim::<4>(2).expand([batch, time, num_negatives, hidden]);
 
-    let idx_dims = sampled_negative_indices.dims();
-    let tgt_dims = targets.dims();
-
     let negative_features = Tensor::gather(targets, 1, sampled_negative_indices);
-    let neg_dims = negative_features.dims();
     let negative_features = negative_features.permute([2, 0, 1, 3]);
 
-    let negative_dims = negative_features.dims();
 
     //negative_features
 

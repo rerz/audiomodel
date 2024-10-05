@@ -33,7 +33,7 @@ impl<B: Backend> BurnTransformer<B> {
         let hidden = hidden_conv + hidden;
 
         // TODO: pad to multiple?
-       // let hidden = hidden.swap_dims(0, 1);
+        // let hidden = hidden.swap_dims(0, 1);
 
         let hidden = self.transformer_encoder.forward(
             TransformerEncoderInput::new(hidden).mask_attn(attention_mask.unsqueeze_dim(1)),
@@ -51,7 +51,7 @@ impl<B: Backend> Encoder<B> for BurnTransformer<B> {
     fn new(
         config: Self::Config,
         hidden_size: usize,
-        extractor_output_size: usize,
+        extractor_output_size: u32,
         device: &B::Device,
     ) -> Self {
         let pos_conv = config.pos_conv_config.init(device);
@@ -64,7 +64,7 @@ impl<B: Backend> Encoder<B> for BurnTransformer<B> {
                 config.num_heads,
                 config.num_layers,
             )
-            .init(device),
+                .init(device),
         }
     }
 

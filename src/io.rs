@@ -1,9 +1,54 @@
 use std::io::Cursor;
 use std::iter;
+use color_eyre::owo_colors::OwoColorize;
 
 use itertools::Itertools;
 use rmp3::{DecoderOwned, Frame};
 use samplerate::ConverterType;
+use symphonia::core::audio::{AudioBufferRef, Signal};
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::default;
+
+// TODO: move to symphonia based decoders
+
+pub fn read_audio_bytes(bytes: &[u8]) -> (Vec<f32>, u32) {
+    let mss = symphonia::core::io::MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+    let hint = Hint::new();
+    let meta_opts = MetadataOptions::default();
+    let format_opts = FormatOptions::default();
+    let probed = symphonia::default::get_probe().format(&hint, mss, &format_opts, &meta_opts).unwrap();
+    let mut format = probed.format;
+    let track = format.tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .expect("no supported audio tracks");
+
+    let mut decoder = default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .expect("unsupported codec");
+
+    let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.unwrap();
+
+    let mut pcm_data = Vec::new();
+    while let Ok(packet) = format.next_packet() {
+        while !format.metadata().is_latest() {
+            format.metadata().pop();
+        }
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet).unwrap() {
+            AudioBufferRef::F32(buf) => pcm_data.extend(buf.chan(0)),
+            _ => panic!(),
+        }
+    }
+
+    (pcm_data, sample_rate)
+}
 
 pub trait Format {
     fn read(bytes: &[u8]) -> (Vec<f32>, u32);
@@ -28,7 +73,6 @@ fn average_interleaved(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-
 fn read_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
     let mut decoder = DecoderOwned::new(bytes);
     let (samples, sample_rates): (Vec<_>, Vec<_>) = iter::from_fn(|| {
@@ -39,7 +83,7 @@ fn read_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
                 let channels = audio.channels();
 
                 Some((audio.samples().to_vec(), audio.sample_rate()))
-            },
+            }
             _ => None,
         }
     })
@@ -110,10 +154,10 @@ fn read_ogg(bytes: &[u8]) -> (Vec<f32>, u32) {
 
     while let Some(packet) = reader.read_dec_packet_generic::<Vec<Vec<f32>>>().unwrap() {
         let mean = packet[0]
-        .iter()
-        .enumerate()
-        .map(|(i, _)| packet.iter().map(|c| c[i]).sum::<f32>() / packet.len() as f32)
-        .collect_vec();
+            .iter()
+            .enumerate()
+            .map(|(i, _)| packet.iter().map(|c| c[i]).sum::<f32>() / packet.len() as f32)
+            .collect_vec();
 
         samples.extend(mean);
     }

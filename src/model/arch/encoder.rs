@@ -14,7 +14,7 @@ pub trait EncoderConfig {
 pub trait Encoder<B: Backend>: Module<B> {
     type Config: EncoderConfig;
 
-    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize, device: &B::Device) -> Self;
+    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: u32, device: &B::Device) -> Self;
 
     fn forward(&self, hidden: Tensor<B, 3>, attention_mask: Tensor<B, 2, Bool>) -> Tensor<B, 3>;
 }

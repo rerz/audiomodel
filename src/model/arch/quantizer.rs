@@ -17,12 +17,13 @@ pub trait Quantizer<B: Backend>: Module<B> {
 
     fn new(last_conv_dim: usize, config: Self::Config, device: &B::Device) -> Self;
 
-    fn forward<const TRAINING: bool>(
+    fn forward(
         &self,
         features: Tensor<B, 3>,
         mask_time_steps: Tensor<B, 2, Bool>,
+        training: bool,
         device: &B::Device,
-    ) -> (Tensor<B, 3>, Tensor<B, 1>);
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Option<Tensor<B, 1>>);
 
     fn num_groups(&self) -> usize;
 

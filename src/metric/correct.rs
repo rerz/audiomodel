@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+
 use burn::prelude::Backend;
 use burn::train::metric::{Metric, MetricEntry, MetricMetadata, Numeric};
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
@@ -6,7 +7,7 @@ use burn::train::metric::state::{FormatOptions, NumericMetricState};
 #[derive(Default)]
 pub struct CorrectMetric<B: Backend> {
     pub state: NumericMetricState,
-    _phantom: PhantomData<B>
+    _phantom: PhantomData<B>,
 }
 
 pub struct CorrectInput {
@@ -17,7 +18,7 @@ impl<B: Backend> Metric for CorrectMetric<B> {
     const NAME: &'static str = "Num Correct";
     type Input = CorrectInput;
 
-    fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
+    fn update(&mut self, item: &Self::Input, _metadata: &MetricMetadata) -> MetricEntry {
         let correct = item.value;
         self.state.update(correct as f64, 1, FormatOptions::new("Num Correct").precision(1))
     }

@@ -1,8 +1,8 @@
 use std::iter;
-use burn::backend::libtorch::LibTorchDevice;
-use burn::backend::{LibTorch, NdArray};
-use burn::backend::ndarray::NdArrayDevice;
 
+use burn::backend::{LibTorch, NdArray};
+use burn::backend::libtorch::LibTorchDevice;
+use burn::backend::ndarray::NdArrayDevice;
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::{Gelu, Initializer, LayerNorm, LayerNormConfig, PaddingConfig1d};
@@ -87,7 +87,7 @@ impl FeatureExtractorConfig {
         *self.conv_dims.last().unwrap()
     }
 
-    pub fn output_len<B: Backend>(&self, input_len: usize) -> usize {
+    pub fn output_len<B: Backend>(&self, input_len: u32) -> u32 {
         feature_extractor_output_lens::<B>(vec![input_len], &self.conv_kernels, &self.conv_strides)
             [0]
     }
@@ -133,11 +133,11 @@ impl<B: Backend> FeatureExtractor<B> {
         &self.strides
     }
 
-    pub fn output_len(&self, input_len: usize) -> usize {
+    pub fn output_len(&self, input_len: u32) -> u32 {
         feature_extractor_output_lens::<B>(vec![input_len], &self.kernel_sizes, &self.strides)[0]
     }
 
-        pub fn receptive_field(&self, sample_rate: u32) -> f32 {
+    pub fn receptive_field(&self, sample_rate: u32) -> f32 {
         let mut receptive_field = 1.0;
         let mut total_stride = 1.0;
 
@@ -165,16 +165,13 @@ pub fn conv1d_output_len<B: Backend>(
 }
 
 pub fn feature_extractor_output_lens<B: Backend>(
-    mut sequence_lens: Vec<usize>,
+    mut sequence_lens: Vec<u32>,
     kernel_sizes: &[usize],
     strides: &[usize],
-) -> Vec<usize> {
+) -> Vec<u32> {
     for (kernel, stride) in iter::zip(kernel_sizes, strides) {
-        //println!("seq len {}", sequence_lens[0]);
-        sequence_lens = sequence_lens.into_iter().map(|len| calculate_conv_output_size(*kernel, *stride, 0, 1, len)).collect(); //  conv1d_output_len::<B>(sequence_lens, *kernel, *stride, 0);
+        sequence_lens = sequence_lens.into_iter().map(|len| calculate_conv_output_size(*kernel, *stride, 0, 1, len as usize) as u32).collect(); //  conv1d_output_len::<B>(sequence_lens, *kernel, *stride, 0);
     }
-
-    //println!("seq len {}", sequence_lens[0]);
 
     sequence_lens
 }
@@ -198,5 +195,4 @@ fn test_extractor_output() {
     let output = extractor.forward(input);
 
     //println!("{}", output);
-
 }

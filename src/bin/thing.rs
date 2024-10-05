@@ -19,11 +19,11 @@ fn main() {
         .par_bridge()
         .map(|track| track.into())
         .map(|item: AudioSample| AudioSample {
-                        audio: resample(item.audio, item.sr, 16_000),
-                        sr: 16_000,
-                        id: item.id,
-                        group_label: item.group_label,
-                    })
+            audio: resample(item.audio, item.sr, 16_000),
+            sr: 16_000,
+            id: item.id,
+            group_label: item.group_label,
+        })
         .collect::<Vec<_>>();
 
     resampled_dataset.write_all("train", &train_samples).unwrap();
@@ -35,11 +35,11 @@ fn main() {
         .par_bridge()
         .map(|track| track.into())
         .map(|item: AudioSample| AudioSample {
-                        audio: resample(item.audio, item.sr, 16_000),
-                        sr: 16_000,
-                        id: item.id,
-                        group_label: item.group_label,
-                    }).collect::<Vec<_>>();
+            audio: resample(item.audio, item.sr, 16_000),
+            sr: 16_000,
+            id: item.id,
+            group_label: item.group_label,
+        }).collect::<Vec<_>>();
 
     resampled_dataset.write_all("test", &test_samples).unwrap();
 

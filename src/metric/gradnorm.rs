@@ -1,9 +1,11 @@
 use std::marker::PhantomData;
+
 use burn::module::{ModuleVisitor, ParamId};
 use burn::prelude::{Backend, Tensor};
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::{Metric, MetricEntry, MetricMetadata, Numeric};
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
+
 use crate::ops::l2;
 
 pub struct GradientNorm<'a, B: AutodiffBackend> {

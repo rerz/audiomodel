@@ -231,7 +231,7 @@ impl<B: Backend> TransformerEncoder<B> {
 impl<B: Backend> Encoder<B> for TransformerEncoder<B> {
     type Config = TransformerEncoderConfig;
 
-    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: usize, device: &B::Device) -> Self {
+    fn new(config: Self::Config, hidden_size: usize, extractor_output_size: u32, device: &B::Device) -> Self {
         config.init(hidden_size, device)
     }
 

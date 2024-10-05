@@ -1,12 +1,10 @@
-use burn::module::AutodiffModule;
 use burn::prelude::Backend;
+
 use crate::model::AudioModelConfig;
-use crate::model::encoder::EncoderConfig;
 use crate::model::extractor::FeatureExtractorConfig;
 use crate::model::pretrain::PretrainConfig;
 use crate::model::projection::FeatureProjectionConfig;
 use crate::model::quantizer::gumbel::GumbelQuantizerConfig;
-use crate::model::quantizer::QuantizerConfig;
 
 pub fn wav2vec2_config<B: Backend>() -> (PretrainConfig, (), GumbelQuantizerConfig) {
     let hidden_size = 768;

@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+
 use burn::prelude::Backend;
 use burn::train::metric::{Metric, MetricEntry, MetricMetadata, Numeric};
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
@@ -6,7 +7,7 @@ use burn::train::metric::state::{FormatOptions, NumericMetricState};
 #[derive(Default)]
 pub struct MaskingRatio<B: Backend> {
     state: NumericMetricState,
-    _backend: PhantomData<B>
+    _backend: PhantomData<B>,
 }
 
 pub struct MaskingRatioInput {

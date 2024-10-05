@@ -1,68 +1,118 @@
-use burn::data::dataloader::DataLoaderBuilder;
+use burn::data::dataloader::{DataLoaderBuilder, Dataset};
 use burn::data::dataset::SqliteDataset;
 use burn::grad_clipping::GradientClippingConfig;
-use burn::module::Module;
+use burn::module::{AutodiffModule, Module, ModuleDisplay};
 use burn::optim::AdamWConfig;
+use burn::prelude::Backend;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::LearnerBuilder;
 use burn::train::metric::{LearningRateMetric, LossMetric};
+use ndarray::Data;
 
 use crate::data::{AudioBatcher, AudioSample};
 use crate::mask::block::{BlockMask, BlockMaskConfig};
+use crate::metric::code_perplexity::CodePerplexityMetric;
+use crate::metric::contrastive_loss::ContrastiveLossMetric;
 use crate::metric::correct::CorrectMetric;
+use crate::metric::diversity_loss::DiversityLossMetric;
 use crate::metric::gradnorm::GradientNormMetric;
 use crate::metric::maskingratio::MaskingRatio;
 use crate::metric::perplexity::PerplexityMetric;
 use crate::metric::temperature::TemperatureMetric;
-use crate::model::encoder::burn_transformer::BurnTransformer;
-use crate::model::encoder::Encoder;
-use crate::model::pretrain::Pretrain;
-use crate::model::quantizer::gumbel::GumbelQuantizer;
-use crate::model::quantizer::Quantizer;
+use crate::model::AudioModel;
+use crate::model::encoder::{Encoder, EncoderConfig};
+use crate::model::pretrain::{Pretrain, PretrainConfig};
+use crate::model::quantizer::{Quantizer, QuantizerConfig};
 use crate::ops::PolynomialDecay;
 
-pub fn pretrain<B: AutodiffBackend>(
+pub struct TrainConfig {
+    pub input_len: u32,
+    pub mask_config: BlockMaskConfig,
+}
+
+pub struct ConfigBundle<EC, QC> {
+    pub pretrain_config: PretrainConfig,
+    pub encoder_config: EC,
+    pub quantizer_config: QC,
+}
+
+impl<EC: EncoderConfig, QC: QuantizerConfig> ConfigBundle<EC, QC> {
+    pub fn init<B: Backend>(self, input_len: u32, device: &B::Device) -> Pretrain<B, <EC as EncoderConfig>::Model<B>, <QC as QuantizerConfig>::Model<B>> {
+        let model: Pretrain<B, _, _> =
+            self.pretrain_config
+            .clone()
+            .init(input_len, self.encoder_config, self.quantizer_config, device);
+
+        model
+    }
+}
+
+pub trait ModelConstructor {
+    type Backend: Backend;
+    type Model<B>;
+}
+
+type Model<C> = <C as ModelConstructor>::Model<<C as ModelConstructor>::Backend>;
+
+pub fn pretrain<B: AutodiffBackend, EC: EncoderConfig, QC: QuantizerConfig>(
     device: B::Device,
-    input_len: usize,
-    dataset_train: SqliteDataset<AudioSample>,
-    dataset_test: SqliteDataset<AudioSample>,
-) {
-    tch::maybe_init_cuda();
+    train_config: TrainConfig,
+    model_configs: ConfigBundle<EC, QC>,
+    dataset_train: impl Dataset<AudioSample> + 'static,
+    dataset_test: impl Dataset<AudioSample> + 'static,
+) -> AudioModel<B, <EC as EncoderConfig>::Model<B>>
+    where
+        <EC as EncoderConfig>::Model<B>: AutodiffModule<B> + ModuleDisplay,
+        <<EC as EncoderConfig>::Model<B> as AutodiffModule<B>>::InnerModule: ModuleDisplay,
+        <QC as QuantizerConfig>::Model<B>: AutodiffModule<B> + ModuleDisplay,
+        <<QC as QuantizerConfig>::Model<B> as AutodiffModule<B>>::InnerModule: ModuleDisplay,
+        <<EC as EncoderConfig>::Model<B> as AutodiffModule<B>>::InnerModule:
+        Encoder<<B as AutodiffBackend>::InnerBackend>,
+        <<QC as QuantizerConfig>::Model<B> as AutodiffModule<B>>::InnerModule:
+        Quantizer<<B as AutodiffBackend>::InnerBackend>,
+        <EC as EncoderConfig>::Model<B>: 'static,
+        <QC as QuantizerConfig>::Model<B>: 'static,
+{
+    //tch::maybe_init_cuda();
 
-    let (pretrain_config, encoder_config, quantizer_config) =
-        crate::config::small_music::small_music_config::<B>();
+    let input_len = train_config.input_len;
+    let mask_config = train_config.mask_config;
 
-    let model: Pretrain<B, BurnTransformer<B>, GumbelQuantizer<B>> =
+    let ConfigBundle {
+        pretrain_config,
+        quantizer_config,
+        encoder_config,
+    } = model_configs;
+
+    let model: Pretrain<B, _, _> =
         pretrain_config
             .clone()
             .init(input_len, encoder_config, quantizer_config, &device);
 
-    let mask_config = BlockMaskConfig {
-        mask_prob: 0.65,
-        mask_len: 10,
-        min_masks: 1,
-    };
-
-    let batcher = AudioBatcher::<B, BlockMask>::new(
+    let batcher = AudioBatcher::<B, BlockMask>::training(
         input_len,
+        100,
         pretrain_config.model_config.clone(),
         mask_config.clone(),
+        true,
         device.clone(),
     );
     let data_loader_train = DataLoaderBuilder::new(batcher)
-        .batch_size(8)
+        .batch_size(4)
         .num_workers(1)
         .shuffle(0)
         .build(dataset_train);
 
-    let batcher = AudioBatcher::<B::InnerBackend, BlockMask>::new(
+    let batcher = AudioBatcher::<B::InnerBackend, BlockMask>::training(
         input_len,
+        100,
         pretrain_config.model_config,
         mask_config.clone(),
+        true,
         device.clone(),
     );
     let data_loader_test = DataLoaderBuilder::new(batcher)
-        .batch_size(1)
+        .batch_size(4)
         .num_workers(1)
         .shuffle(0)
         .build(dataset_test);
@@ -77,6 +127,7 @@ pub fn pretrain<B: AutodiffBackend>(
 
     let learner = LearnerBuilder::new(".out")
         .devices(vec![device])
+        // train metrics
         .metric_train_numeric(LossMetric::new())
         .metric_train_numeric(PerplexityMetric::<B>::default())
         .metric_train_numeric(GradientNormMetric::<B>::default())
@@ -84,8 +135,21 @@ pub fn pretrain<B: AutodiffBackend>(
         .metric_train_numeric(TemperatureMetric::<B>::default())
         .metric_train_numeric(CorrectMetric::<B>::default())
         .metric_train_numeric(MaskingRatio::<B>::default())
-        .num_epochs(50)
+        .metric_train_numeric(ContrastiveLossMetric::<B>::default())
+        .metric_train_numeric(DiversityLossMetric::<B>::default())
+        // validation metrics
+        .metric_valid_numeric(LossMetric::new())
+        .metric_valid_numeric(DiversityLossMetric::<B>::default())
+        .metric_valid_numeric(ContrastiveLossMetric::<B>::default())
+        .metric_valid_numeric(PerplexityMetric::<B>::default())
+        .metric_valid_numeric(CodePerplexityMetric::<B>::default())
+        .metric_valid_numeric(CorrectMetric::<B>::default())
+        .num_epochs(20)
         .summary()
         .build(model, optimizer, scheduler);
     let trained = learner.fit(data_loader_train, data_loader_test);
+
+    let encoder = trained.model;
+
+    encoder
 }

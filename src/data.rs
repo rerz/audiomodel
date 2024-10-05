@@ -1,35 +1,35 @@
+mod music_genres;
+
 use std::collections::{HashMap, HashSet};
 
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::Dataset;
 use burn::data::dataset::{HuggingfaceDatasetLoader, InMemDataset, SqliteDataset};
+use burn::module::Module;
+use burn::nn::{LayerNorm, LayerNormConfig};
 use burn::prelude::{Backend, Bool, Int, Tensor};
 use itertools::Itertools;
 use rayon::iter::ParallelBridge;
+use rayon::iter::ParallelIterator;
 use samplerate::ConverterType;
 use serde::{Deserialize, Serialize};
 use soa_derive::StructOfArray;
+use burnx::sequence::mask::{MaskingStrategy, NoneMask};
+use burnx::sequence::mine::SamplingStrategy;
 
 use crate::io::read_bytes_inferred;
-use crate::mask::block::{BlockMask, BlockMaskConfig};
-use crate::mask::MaskingStrategy;
 use crate::mine::sample_negative_indices;
 use crate::model::AudioModelConfig;
 use crate::model::extractor::feature_extractor_output_lens;
 use crate::pad::{pad_sequences, PaddingType};
 
-pub struct AudioDataset {
-    pub inner: InMemDataset<AudioSample>,
+
+
+pub struct AudioDataset<D: Dataset<AudioSample>> {
+    pub inner: D,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MusicGenresItem {
-    audio_bytes: Vec<u8>,
-    audio_path: Option<String>,
-    song_id: i64,
-    genre_id: i64,
-    genre: String,
-}
+
 
 impl From<MusicGenresItem> for AudioSample {
     fn from(value: MusicGenresItem) -> Self {
@@ -43,10 +43,8 @@ impl From<MusicGenresItem> for AudioSample {
     }
 }
 
-use rayon::iter::ParallelIterator;
-
-impl AudioDataset {
-    pub fn music_genres() -> (AudioDataset, AudioDataset) {
+impl<D: Dataset<AudioSample>> AudioDataset<D> {
+    pub fn music_genres() -> (AudioDataset<D>, AudioDataset<D>) {
         let dataset_train = HuggingfaceDatasetLoader::new("lewtun/music_genres")
             .dataset::<MusicGenresItem>("train")
             .unwrap()
@@ -63,17 +61,18 @@ impl AudioDataset {
             .map(|track| track.into())
             .collect::<Vec<_>>();
 
-        (Self { inner: InMemDataset::new(dataset_train) }, Self { inner: InMemDataset::new(dataset_test) })
+        (
+            Self {
+                inner: InMemDataset::new(dataset_train),
+            },
+            Self {
+                inner: InMemDataset::new(dataset_test),
+            },
+        )
     }
 
     pub fn music_genres_small() -> AudioDataset {
-        let dataset = HuggingfaceDatasetLoader::new("lewtun/music_genres_small")
-            .dataset::<MusicGenresItem>("train")
-            .unwrap()
-            .iter()
-            .par_bridge()
-            .map(|track| track.into())
-            .collect::<Vec<_>>();
+
 
         Self {
             inner: InMemDataset::new(dataset),
@@ -85,37 +84,61 @@ impl AudioDataset {
 pub struct AudioBatch<B: Backend> {
     pub device: B::Device,
     pub sequences: Tensor<B, 2>,
-    pub sequence_lens: Vec<usize>,
+    pub sequence_lens: Vec<u32>,
     pub padding_mask: Tensor<B, 2, Bool>,
-    pub masked_time_indices: Tensor<B, 2, Bool>,
+    pub masked_time_steps: Option<Tensor<B, 2, Bool>>,
     pub sampled_negative_indices: Tensor<B, 3, Int>,
 }
 
 #[derive(Clone)]
 pub struct AudioBatcher<B: Backend, M: MaskingStrategy<B>> {
-    padding_len: usize,
+    pad_to_len: u32,
+    num_negatives: usize,
     config: AudioModelConfig,
     device: B::Device,
     mask_config: M::Config,
+    apply_mask: bool,
+    norm: LayerNorm<B>,
 }
 
-impl<B: Backend, M: MaskingStrategy<B>> AudioBatcher<B, M> {
-    pub fn new(
-        pad_to_len: usize,
-        config: AudioModelConfig,
-        mask_config: M::Config,
-        device: B::Device,
-    ) -> Self {
+impl<B: Backend> AudioBatcher<B, NoneMask> {
+    pub fn inference(pad_to_len: u32, config: AudioModelConfig, device: B::Device) -> Self {
+        let norm = LayerNormConfig::new(pad_to_len as usize).init(&device);
         Self {
             config,
+            norm,
+            pad_to_len,
+            apply_mask: false,
+            mask_config: (),
+            num_negatives: 0,
             device,
-            padding_len: pad_to_len,
-            mask_config,
         }
     }
 }
 
-impl<B: Backend, M: MaskingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for AudioBatcher<B, M> {
+impl<B: Backend, M: MaskingStrategy<B>> AudioBatcher<B, M> {
+    pub fn pretrain(
+        pad_to_len: u32,
+        num_negatives: usize,
+        config: AudioModelConfig,
+        mask_config: M::Config,
+        apply_mask: bool,
+        device: B::Device,
+    ) -> Self {
+        let norm = LayerNormConfig::new(pad_to_len as usize).init(&device);
+        Self {
+            config,
+            num_negatives,
+            device,
+            pad_to_len,
+            mask_config,
+            apply_mask,
+            norm,
+        }
+    }
+}
+
+impl<B: Backend, M: MaskingStrategy<B>, S: SamplingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for AudioBatcher<B, M> {
     fn batch(&self, items: Vec<AudioSample>) -> AudioBatch<B> {
         let batch = items.len();
 
@@ -123,10 +146,10 @@ impl<B: Backend, M: MaskingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for 
 
         let padded = pad_sequences(
             audio.clone(),
-            PaddingType::Explicit(self.padding_len),
+            PaddingType::Explicit(self.pad_to_len),
             &self.device,
         );
-        let max_seq_len = padded.sequences.dims()[1];
+        let max_seq_len = padded.sequences.dims()[1] as u32;
 
         let padded_seq_lens = padded.sequence_lens.clone();
 
@@ -142,33 +165,37 @@ impl<B: Backend, M: MaskingStrategy<B>> Batcher<AudioSample, AudioBatch<B>> for 
             &self.config.feature_extractor_config.conv_strides,
         );
 
-        let masked_time_indices = M::get_mask_indices(
-            [batch, extracted_features_seq_len],
-            extracted_seq_lens.clone(),
-            self.mask_config.clone(),
-            &self.device,
-        );
+        let masked_time_indices = if self.apply_mask {
+            Some(M::get_mask_indices(
+                [batch, extracted_features_seq_len as usize],
+                extracted_seq_lens.clone(),
+                self.mask_config.clone(),
+                &self.device,
+            ))
+        } else {
+            None
+        };
 
-        let mask_dims = masked_time_indices.dims();
-
-        let num = masked_time_indices.clone().nonzero()[1].clone().dims()[0];
+        let num = masked_time_indices.clone().unwrap().nonzero()[1].clone().dims()[0];
 
         let sampled_negative_indices = sample_negative_indices(
             [batch, num],
-            100,
-            masked_time_indices.clone(),
+            self.num_negatives,
+            masked_time_indices.clone().unwrap(),
             extracted_seq_lens,
             &self.device,
         );
 
         //println!("batch seq dims {:?}", padded.sequences.dims());
 
+        let sequences = self.norm.clone().no_grad().forward(padded.sequences);
+
         AudioBatch {
             device: self.device.clone(),
-            sequences: padded.sequences,
+            sequences,
             padding_mask: padded.attention_mask,
             sequence_lens: padded.sequence_lens,
-            masked_time_indices,
+            masked_time_steps: masked_time_indices,
             sampled_negative_indices,
         }
     }
